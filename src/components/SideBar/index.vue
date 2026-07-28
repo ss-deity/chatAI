@@ -9,7 +9,9 @@ interface ChatItem {
 
 interface UserInfo {
   id: string
+  uid: string
   username: string
+  nickname: string
   avatar: string
 }
 
@@ -17,6 +19,7 @@ const props = defineProps<{
   activeId: string
   conversations: ChatItem[]
   user: UserInfo | null
+  activeView?: 'chat' | 'files'
 }>()
 
 const emit = defineEmits<{
@@ -24,6 +27,7 @@ const emit = defineEmits<{
   newChat: []
   logout: []
   openSettings: []
+  openFileManager: []
   delete: [id: string]
 }>()
 
@@ -42,6 +46,10 @@ const pendingDeleteItem = ref<ChatItem | null>(null)
 
 function handleNewChat() {
   emit('newChat')
+}
+
+function handleOpenFileManager() {
+  emit('openFileManager')
 }
 
 function handleSelect(id: string) {
@@ -143,6 +151,17 @@ function handleSettings() {
         <span>新建对话</span>
       </div>
 
+      <div
+        class="nav-entry"
+        :class="{ active: props.activeView === 'files' }"
+        @click="handleOpenFileManager"
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <path d="M1.5 4.5a1 1 0 011-1h3.2a1 1 0 01.7.3l1 1a1 1 0 00.7.3h4.2a1 1 0 011 1v6.1a1 1 0 01-1 1h-11a1 1 0 01-1-1V4.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
+        </svg>
+        <span>文件管理</span>
+      </div>
+
       <div class="history-list">
         <div v-if="chatList.length === 0" class="empty-state">
           暂无对话记录
@@ -188,7 +207,7 @@ function handleSettings() {
               <path d="M4 20c0-3.3 3.6-6 8-6s8 2.7 8 6" fill="#bfbfbf"/>
             </svg>
           </div>
-          <span class="user-name">{{ props.user?.username || '用户' }}</span>
+          <span class="user-name">{{ props.user?.nickname || props.user?.username || '用户' }}</span>
         </div>
 
         <!-- 弹出菜单 -->
@@ -221,6 +240,16 @@ function handleSettings() {
       <button class="new-chat-icon" @click="handleNewChat" title="新建对话">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
           <path d="M8 3V13M3 8H13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+      </button>
+      <button
+        class="new-chat-icon"
+        :class="{ active: props.activeView === 'files' }"
+        title="文件管理"
+        @click="handleOpenFileManager"
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <path d="M1.5 4.5a1 1 0 011-1h3.2a1 1 0 01.7.3l1 1a1 1 0 00.7.3h4.2a1 1 0 011 1v6.1a1 1 0 01-1 1h-11a1 1 0 01-1-1V4.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
         </svg>
       </button>
       <div class="fold-spacer"></div>
@@ -391,6 +420,34 @@ function handleSettings() {
 
 .new-chat-btn:active {
   background: var(--gf-bg-elevated-hover);
+}
+
+.nav-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--gf-text-regular);
+  margin-bottom: 8px;
+  transition: background 0.15s, color 0.15s;
+}
+
+.nav-entry:hover {
+  background: var(--gf-bg-elevated);
+}
+
+.nav-entry.active {
+  background: var(--gf-bg-elevated);
+  color: var(--gf-primary);
+}
+
+.new-chat-icon.active {
+  background: var(--gf-bg-elevated);
+  color: var(--gf-primary);
 }
 
 .history-list {

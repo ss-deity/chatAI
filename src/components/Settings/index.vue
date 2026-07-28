@@ -4,7 +4,9 @@ import { ElMessage } from 'element-plus'
 
 interface UserInfo {
   id: string
+  uid: string
   username: string
+  nickname: string
   avatar: string
 }
 
@@ -17,7 +19,7 @@ const emit = defineEmits<{
   updateUser: [user: UserInfo]
 }>()
 
-const nickname = ref(props.user?.username || '')
+const nickname = ref(props.user?.nickname || props.user?.username || '')
 const uploading = ref(false)
 const savingNickname = ref(false)
 const theme = ref<'light' | 'dark'>(
@@ -43,7 +45,7 @@ function isAllowedAvatar(file: File): boolean {
 }
 
 onMounted(() => {
-  nickname.value = props.user?.username || ''
+  nickname.value = props.user?.nickname || props.user?.username || ''
 })
 
 async function handleAvatarChange(e: Event) {
@@ -101,9 +103,10 @@ async function handleAvatarChange(e: Event) {
 async function handleNicknameSave() {
   const name = nickname.value.trim()
   if (!props.user) return
+  const current = props.user.nickname || props.user.username
   // 未变化或空则不请求
-  if (!name || name === props.user.username) {
-    nickname.value = props.user.username
+  if (!name || name === current) {
+    nickname.value = current
     return
   }
   if (savingNickname.value) return
@@ -113,21 +116,21 @@ async function handleNicknameSave() {
     const res = await fetch(`http://localhost:3000/users/${props.user.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: name }),
+      body: JSON.stringify({ nickname: name }),
     })
     const data = await res.json()
     if (data.code !== 0 || !data.data) {
       ElMessage.error(data.message || '名称更新失败')
-      nickname.value = props.user.username
+      nickname.value = current
       return
     }
     emit('updateUser', data.data)
-    nickname.value = data.data.username
+    nickname.value = data.data.nickname || data.data.username
     ElMessage.success('名称已更新')
   } catch (err) {
     console.error('名称更新失败', err)
     ElMessage.error('名称更新失败')
-    nickname.value = props.user.username
+    nickname.value = current
   } finally {
     savingNickname.value = false
   }
@@ -192,6 +195,14 @@ function selectTheme(t: 'light' | 'dark') {
               @blur="handleNicknameSave"
               @keydown.enter="handleNicknameSave"
             />
+          </div>
+        </div>
+
+        <!-- 账号（登录用，只读） -->
+        <div class="setting-row">
+          <span class="setting-label">账号</span>
+          <div class="setting-content">
+            <span class="account-text">{{ props.user?.username || '-' }}</span>
           </div>
         </div>
 
@@ -394,6 +405,14 @@ function selectTheme(t: 'light' | 'dark') {
 .nickname-input:focus {
   border-color: var(--gf-primary);
   background: var(--gf-bg-panel);
+}
+
+.account-text {
+  display: inline-block;
+  padding: 6px 0;
+  font-size: 14px;
+  color: var(--gf-text-secondary);
+  user-select: text;
 }
 
 /* 主题选择 */

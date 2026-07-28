@@ -3,7 +3,9 @@ import { ref } from 'vue'
 
 interface LoginUser {
   id: string
+  uid: string
   username: string
+  nickname: string
   avatar: string
 }
 

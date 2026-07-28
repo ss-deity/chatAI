@@ -156,3 +156,28 @@
 *::-webkit-scrollbar-corner {
   background: transparent;
 }
+
+/* ============================================
+ * 全局手型光标：所有可点击元素 hover 时显示小手，
+ * 禁用态显示禁止光标。业务里以 <div @click> 实现的可点击项
+ * 已在各自组件内单独声明 cursor: pointer。
+ * ============================================ */
+button,
+a,
+label,
+select,
+summary,
+[role='button'],
+[role='tab'],
+[role='menuitem'],
+.link {
+  cursor: pointer;
+}
+
+button:disabled,
+button[disabled],
+[disabled],
+[aria-disabled='true'],
+.disabled {
+  cursor: not-allowed;
+}

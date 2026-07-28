@@ -52,6 +52,7 @@ src
 ├── utils
 ├── views
 ├── App.vue
+└── main.ts├── index.vue
 └── main.ts
 ```
 

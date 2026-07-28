@@ -1,0 +1,887 @@
+<script setup lang="ts">
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ElMessage } from 'element-plus'
+import { useVirtualList } from '../../composables/useVirtualList'
+
+interface UserInfo {
+  id: string
+  uid: string
+  username: string
+  nickname: string
+  avatar: string
+}
+
+interface FileEntry {
+  name: string
+  /** 相对用户根目录的路径，如 docs/a.pdf */
+  path: string
+  isDir: boolean
+  size: number
+  /** 毫秒时间戳 */
+  lastModified: number
+  url?: string
+}
+
+const props = defineProps<{ user: UserInfo | null }>()
+
+const BASE = 'http://localhost:3000'
+
+// 文件类型图标：从 assets/file-icons 下按后缀映射
+const iconModules = import.meta.glob('../../assets/file-icons/*.svg', {
+  eager: true,
+  import: 'default',
+}) as Record<string, string>
+
+function pickIcon(key: string): string | undefined {
+  const hit = Object.entries(iconModules).find(([p]) => p.endsWith(`/${key}.svg`))
+  return hit?.[1]
+}
+
+function iconFor(entry: FileEntry): string {
+  if (entry.isDir) return pickIcon('folder') || ''
+  const ext = entry.name.split('.').pop()?.toLowerCase() || ''
+  return pickIcon(ext) || pickIcon('file-default') || ''
+}
+
+const currentDir = ref('')
+const entries = ref<FileEntry[]>([])
+const loading = ref(false)
+const uploading = ref(false)
+const fileInputRef = ref<HTMLInputElement | null>(null)
+
+const userId = computed(() => props.user?.id || '')
+
+/** 面包屑片段：根目录 + 各级目录名 */
+const segments = computed(() =>
+  currentDir.value ? currentDir.value.split('/') : [],
+)
+
+/* --------------------------- 虚拟列表 --------------------------- */
+
+const ITEM_HEIGHT = 50
+const scrollContainer = ref<HTMLElement | null>(null)
+const { totalHeight, offsetY, visibleItems } = useVirtualList(
+  () => entries.value,
+  scrollContainer,
+  { itemHeight: ITEM_HEIGHT },
+)
+
+const showList = computed(() => !loading.value && entries.value.length > 0)
+
+async function loadList() {
+  if (!userId.value) return
+  loading.value = true
+  closeRowMenu()
+  try {
+    const res = await fetch(
+      `${BASE}/files?userId=${encodeURIComponent(userId.value)}&dir=${encodeURIComponent(currentDir.value)}`,
+    )
+    const data = await res.json()
+    if (data.code !== 0) throw new Error(data.message || '加载失败')
+    entries.value = data.data as FileEntry[]
+    if (scrollContainer.value) scrollContainer.value.scrollTop = 0
+  } catch (e) {
+    ElMessage.error('加载文件列表失败: ' + (e as Error).message)
+    entries.value = []
+  } finally {
+    loading.value = false
+  }
+}
+
+function enterFolder(entry: FileEntry) {
+  if (!entry.isDir) return
+  currentDir.value = entry.path
+  loadList()
+}
+
+function goToCrumb(index: number) {
+  // index === -1 表示根目录
+  currentDir.value = index < 0 ? '' : segments.value.slice(0, index + 1).join('/')
+  loadList()
+}
+
+/* --------------------------- 行内更多菜单 --------------------------- */
+
+const MENU_WIDTH = 160
+const MENU_HEIGHT = 84
+const MENU_GAP = 4
+
+const activeMenuPath = ref<string | null>(null)
+const menuTarget = ref<FileEntry | null>(null)
+const menuStyle = ref<Record<string, string>>({})
+let closeTimer: ReturnType<typeof setTimeout> | null = null
+
+function cancelCloseTimer() {
+  if (closeTimer) {
+    clearTimeout(closeTimer)
+    closeTimer = null
+  }
+}
+
+function openRowMenu(entry: FileEntry, ev: MouseEvent) {
+  cancelCloseTimer()
+  const trigger = ev.currentTarget as HTMLElement
+  const rect = trigger.getBoundingClientRect()
+  const openUpward = window.innerHeight - rect.bottom < MENU_HEIGHT + MENU_GAP
+  menuStyle.value = {
+    left: `${rect.right - MENU_WIDTH}px`,
+    ...(openUpward
+      ? { bottom: `${window.innerHeight - rect.top + MENU_GAP}px` }
+      : { top: `${rect.bottom + MENU_GAP}px` }),
+  }
+  menuTarget.value = entry
+  activeMenuPath.value = entry.path
+}
+
+function closeRowMenu() {
+  cancelCloseTimer()
+  activeMenuPath.value = null
+  menuTarget.value = null
+}
+
+function scheduleCloseMenu() {
+  cancelCloseTimer()
+  closeTimer = setTimeout(closeRowMenu, 120)
+}
+
+function handleRenameFromMenu() {
+  const target = menuTarget.value
+  closeRowMenu()
+  if (target) openRename(target)
+}
+
+function handleDeleteFromMenu() {
+  const target = menuTarget.value
+  closeRowMenu()
+  if (target) openDelete(target)
+}
+
+/* ------------------------------ 上传 ------------------------------ */
+
+function triggerUpload() {
+  fileInputRef.value?.click()
+}
+
+async function onFileChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  const files = Array.from(input.files ?? [])
+  input.value = ''
+  if (!files.length || !userId.value) return
+
+  uploading.value = true
+  let ok = 0
+  for (const file of files) {
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      const res = await fetch(
+        `${BASE}/upload?userId=${encodeURIComponent(userId.value)}&dir=${encodeURIComponent(currentDir.value)}`,
+        { method: 'POST', body: fd },
+      )
+      const data = await res.json()
+      if (data.code !== 0) throw new Error(data.message || '上传失败')
+      ok += 1
+    } catch (err) {
+      ElMessage.error(`「${file.name}」上传失败: ` + (err as Error).message)
+    }
+  }
+  uploading.value = false
+  if (ok > 0) {
+    ElMessage.success(`成功上传 ${ok} 个文件`)
+    loadList()
+  }
+}
+
+/* --------------------------- 新建文件夹 --------------------------- */
+
+const showNewFolder = ref(false)
+const newFolderName = ref('')
+const newFolderLoading = ref(false)
+
+function openNewFolder() {
+  newFolderName.value = ''
+  showNewFolder.value = true
+}
+
+async function confirmNewFolder() {
+  const name = newFolderName.value.trim()
+  if (!name) {
+    ElMessage.warning('请输入文件夹名称')
+    return
+  }
+  newFolderLoading.value = true
+  try {
+    const res = await fetch(`${BASE}/files/folder`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: userId.value, dir: currentDir.value, name }),
+    })
+    const data = await res.json()
+    if (data.code !== 0) throw new Error(data.message || '创建失败')
+    ElMessage.success('文件夹已创建')
+    showNewFolder.value = false
+    loadList()
+  } catch (e) {
+    ElMessage.error('创建文件夹失败: ' + (e as Error).message)
+  } finally {
+    newFolderLoading.value = false
+  }
+}
+
+/* ----------------------------- 重命名 ----------------------------- */
+
+const showRename = ref(false)
+const renameTarget = ref<FileEntry | null>(null)
+const renameValue = ref('')
+const renameLoading = ref(false)
+
+function openRename(entry: FileEntry) {
+  renameTarget.value = entry
+  renameValue.value = entry.name
+  showRename.value = true
+}
+
+async function confirmRename() {
+  const target = renameTarget.value
+  const newName = renameValue.value.trim()
+  if (!target) return
+  if (!newName) {
+    ElMessage.warning('请输入新名称')
+    return
+  }
+  if (newName === target.name) {
+    showRename.value = false
+    return
+  }
+  renameLoading.value = true
+  try {
+    const res = await fetch(`${BASE}/files/rename`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: userId.value,
+        path: target.path,
+        newName,
+        isDir: target.isDir,
+      }),
+    })
+    const data = await res.json()
+    if (data.code !== 0) throw new Error(data.message || '重命名失败')
+    ElMessage.success('已重命名')
+    showRename.value = false
+    loadList()
+  } catch (e) {
+    ElMessage.error('重命名失败: ' + (e as Error).message)
+  } finally {
+    renameLoading.value = false
+  }
+}
+
+/* ------------------------------ 删除 ------------------------------ */
+
+const showDelete = ref(false)
+const deleteTarget = ref<FileEntry | null>(null)
+const deleteLoading = ref(false)
+
+function openDelete(entry: FileEntry) {
+  deleteTarget.value = entry
+  showDelete.value = true
+}
+
+async function confirmDelete() {
+  const target = deleteTarget.value
+  if (!target) return
+  deleteLoading.value = true
+  try {
+    const res = await fetch(`${BASE}/files`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: userId.value,
+        path: target.path,
+        isDir: target.isDir,
+      }),
+    })
+    const data = await res.json()
+    if (data.code !== 0) throw new Error(data.message || '删除失败')
+    ElMessage.success('已删除')
+    showDelete.value = false
+    loadList()
+  } catch (e) {
+    ElMessage.error('删除失败: ' + (e as Error).message)
+  } finally {
+    deleteLoading.value = false
+  }
+}
+
+/* ---------------------------- 格式化 ---------------------------- */
+
+function formatSize(bytes: number, isDir: boolean): string {
+  if (isDir) return '-'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = bytes
+  let i = 0
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024
+    i += 1
+  }
+  return `${value.toFixed(i === 0 ? 0 : 2)}${units[i]}`
+}
+
+function formatTime(ts: number): string {
+  if (!ts) return '-'
+  const d = new Date(ts)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+onMounted(loadList)
+onBeforeUnmount(cancelCloseTimer)
+</script>
+
+<template>
+  <div class="file-manager">
+    <!-- 顶部：面包屑 + 操作 -->
+    <div class="fm-header">
+      <div class="fm-breadcrumb">
+        <span class="crumb" :class="{ current: segments.length === 0 }" @click="goToCrumb(-1)">
+          我的文件
+        </span>
+        <template v-for="(seg, idx) in segments" :key="idx">
+          <span class="crumb-sep">/</span>
+          <span
+            class="crumb"
+            :class="{ current: idx === segments.length - 1 }"
+            @click="goToCrumb(idx)"
+          >{{ seg }}</span>
+        </template>
+      </div>
+
+      <div class="fm-actions">
+        <!-- 新建文件夹：描边次按钮（对齐 pc-genflow-pro TeamFileActionButton secondary） -->
+        <div class="fm-action-btn secondary" @click="openNewFolder">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M8 3.5v9M3.5 8h9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <span>新建文件夹</span>
+        </div>
+        <!-- 上传文件：反色主按钮（对齐 TeamFileActionButton primary） -->
+        <div class="fm-action-btn primary" :class="{ disabled: uploading }" @click="triggerUpload">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M8 10.5V3M8 3L5 6M8 3l3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M3 11v1.5a1 1 0 001 1h8a1 1 0 001-1V11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          <span>{{ uploading ? '上传中...' : '上传文件' }}</span>
+        </div>
+        <input
+          ref="fileInputRef"
+          type="file"
+          multiple
+          class="fm-file-input"
+          @change="onFileChange"
+        />
+      </div>
+    </div>
+
+    <!-- 列表容器 -->
+    <div class="fm-list">
+      <!-- 表头 -->
+      <div class="fm-list-head">
+        <div class="col-name">名称</div>
+        <div class="col-size">大小</div>
+        <div class="col-time">修改时间</div>
+        <div class="col-ops">操作</div>
+      </div>
+
+      <!-- 空 / 加载态 -->
+      <div v-if="loading" class="fm-empty">加载中...</div>
+      <div v-else-if="entries.length === 0" class="fm-empty">当前文件夹为空</div>
+
+      <!-- 虚拟滚动区 -->
+      <div
+        v-show="showList"
+        ref="scrollContainer"
+        class="fm-list-scroll"
+        @scroll="closeRowMenu"
+      >
+        <div class="fm-virtual-phantom" :style="{ height: `${totalHeight}px` }">
+          <div :style="{ transform: `translateY(${offsetY}px)` }">
+            <div
+              v-for="{ item } in visibleItems"
+              :key="item.path"
+              class="fm-row"
+              :class="{ 'is-dir': item.isDir }"
+              @dblclick="enterFolder(item)"
+            >
+              <div class="col-name">
+                <img :src="iconFor(item)" class="fm-icon" alt="" />
+                <span
+                  v-if="item.isDir"
+                  class="fm-name link"
+                  :title="item.name"
+                  @click="enterFolder(item)"
+                >{{ item.name }}</span>
+                <a
+                  v-else-if="item.url"
+                  class="fm-name link"
+                  :href="item.url"
+                  target="_blank"
+                  rel="noopener"
+                  :title="item.name"
+                >{{ item.name }}</a>
+                <span v-else class="fm-name" :title="item.name">{{ item.name }}</span>
+              </div>
+              <div class="col-size">{{ formatSize(item.size, item.isDir) }}</div>
+              <div class="col-time">{{ formatTime(item.lastModified) }}</div>
+              <div class="col-ops">
+                <div
+                  class="fm-more-hit"
+                  @mouseenter="openRowMenu(item, $event)"
+                  @mouseleave="scheduleCloseMenu"
+                  @click.stop="openRowMenu(item, $event)"
+                >
+                  <div class="fm-more" :class="{ active: activeMenuPath === item.path }" title="更多操作">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                      <circle cx="3" cy="8" r="1.3" fill="currentColor"/>
+                      <circle cx="8" cy="8" r="1.3" fill="currentColor"/>
+                      <circle cx="13" cy="8" r="1.3" fill="currentColor"/>
+                    </svg>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 行内更多操作菜单（Teleport 到 body，fixed 定位，避免被虚拟列表 transform 裁剪） -->
+    <Teleport to="body">
+      <div
+        v-if="activeMenuPath"
+        class="fm-row-menu"
+        :style="menuStyle"
+        @mouseenter="cancelCloseTimer"
+        @mouseleave="scheduleCloseMenu"
+      >
+        <div class="fm-row-menu-item" @click="handleRenameFromMenu">重命名</div>
+        <div class="fm-row-menu-item danger" @click="handleDeleteFromMenu">删除</div>
+      </div>
+    </Teleport>
+
+    <!-- 新建文件夹弹窗 -->
+    <Teleport to="body">
+      <transition name="gf-dialog">
+        <div v-if="showNewFolder" class="gf-dialog-mask" @click.self="showNewFolder = false">
+          <div class="gf-dialog">
+            <div class="gf-dialog-header">
+              <h3 class="gf-dialog-title">新建文件夹</h3>
+              <button class="gf-dialog-close" @click="showNewFolder = false">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path d="M4 4L12 12M12 4L4 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+              </button>
+            </div>
+            <div class="gf-dialog-body">
+              <input
+                v-model="newFolderName"
+                class="fm-input"
+                placeholder="请输入文件夹名称"
+                @keydown.enter="confirmNewFolder"
+              />
+            </div>
+            <div class="gf-dialog-footer">
+              <button class="gf-btn gf-btn-plain" @click="showNewFolder = false">取消</button>
+              <button
+                class="gf-btn gf-btn-primary"
+                :disabled="newFolderLoading"
+                @click="confirmNewFolder"
+              >{{ newFolderLoading ? '创建中...' : '确定' }}</button>
+            </div>
+          </div>
+        </div>
+      </transition>
+    </Teleport>
+
+    <!-- 重命名弹窗 -->
+    <Teleport to="body">
+      <transition name="gf-dialog">
+        <div v-if="showRename" class="gf-dialog-mask" @click.self="showRename = false">
+          <div class="gf-dialog">
+            <div class="gf-dialog-header">
+              <h3 class="gf-dialog-title">重命名</h3>
+              <button class="gf-dialog-close" @click="showRename = false">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path d="M4 4L12 12M12 4L4 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+              </button>
+            </div>
+            <div class="gf-dialog-body">
+              <input
+                v-model="renameValue"
+                class="fm-input"
+                placeholder="请输入新名称"
+                @keydown.enter="confirmRename"
+              />
+            </div>
+            <div class="gf-dialog-footer">
+              <button class="gf-btn gf-btn-plain" @click="showRename = false">取消</button>
+              <button
+                class="gf-btn gf-btn-primary"
+                :disabled="renameLoading"
+                @click="confirmRename"
+              >{{ renameLoading ? '保存中...' : '确定' }}</button>
+            </div>
+          </div>
+        </div>
+      </transition>
+    </Teleport>
+
+    <!-- 删除确认弹窗 -->
+    <Teleport to="body">
+      <transition name="gf-dialog">
+        <div v-if="showDelete" class="gf-dialog-mask" @click.self="showDelete = false">
+          <div class="gf-dialog">
+            <div class="gf-dialog-header">
+              <h3 class="gf-dialog-title">删除{{ deleteTarget?.isDir ? '文件夹' : '文件' }}</h3>
+              <button class="gf-dialog-close" @click="showDelete = false">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path d="M4 4L12 12M12 4L4 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+              </button>
+            </div>
+            <div class="gf-dialog-body">
+              确定要删除
+              <span class="gf-dialog-highlight">「{{ deleteTarget?.name }}」</span>
+              吗？{{ deleteTarget?.isDir ? '文件夹内的所有内容都会被删除，' : '' }}该操作无法撤销。
+            </div>
+            <div class="gf-dialog-footer">
+              <button class="gf-btn gf-btn-plain" @click="showDelete = false">取消</button>
+              <button
+                class="gf-btn gf-btn-primary"
+                :disabled="deleteLoading"
+                @click="confirmDelete"
+              >{{ deleteLoading ? '删除中...' : '删除' }}</button>
+            </div>
+          </div>
+        </div>
+      </transition>
+    </Teleport>
+  </div>
+</template>
+
+<style scoped>
+.file-manager {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-width: 480px;
+  height: 100%;
+  background: var(--gf-bg-page);
+  overflow: hidden;
+}
+
+.fm-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 32px 16px;
+  flex-shrink: 0;
+}
+
+.fm-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 15px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.crumb {
+  color: var(--gf-text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s;
+}
+
+.crumb:hover {
+  color: var(--gf-primary);
+}
+
+.crumb.current {
+  color: var(--gf-text-primary);
+  font-weight: 600;
+  cursor: default;
+}
+
+.crumb-sep {
+  color: var(--gf-text-disabled);
+}
+
+.fm-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+/* 操作按钮：对齐 pc-genflow-pro TeamFileActionButton（h-36 rounded-10 px-4 gap-2 text-sm） */
+.fm-action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 16px;
+  border-radius: 10px;
+  font-size: 14px;
+  cursor: pointer;
+  white-space: nowrap;
+  box-sizing: border-box;
+  transition: background 0.15s, border-color 0.15s, color 0.15s, opacity 0.15s;
+}
+
+.fm-action-btn.secondary {
+  border: 1px solid var(--gf-border-strong);
+  color: var(--gf-text-regular);
+  background: transparent;
+}
+
+.fm-action-btn.secondary:hover {
+  background: var(--gf-bg-elevated);
+}
+
+.fm-action-btn.primary {
+  background: var(--gf-accent);
+  color: var(--gf-bg-panel);
+  font-weight: 500;
+  border: 1px solid var(--gf-accent);
+}
+
+.fm-action-btn.primary:hover {
+  opacity: 0.9;
+}
+
+.fm-action-btn.disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.fm-file-input {
+  display: none;
+}
+
+/* 列表 */
+.fm-list {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  margin: 0 24px 24px;
+  min-height: 0;
+}
+
+.fm-list-head {
+  display: flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 16px;
+  font-size: 12px;
+  color: var(--gf-text-tertiary);
+  flex-shrink: 0;
+}
+
+.fm-list-scroll {
+  flex: 1 1 auto;
+  margin-top: 12px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.fm-virtual-phantom {
+  position: relative;
+  width: 100%;
+}
+
+/* 列宽（对齐参考：名称主列 + 大小/时间/操作） */
+.col-name {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 52%;
+  min-width: 0;
+  padding-right: 16px;
+}
+
+.col-size {
+  width: 15%;
+  flex-shrink: 0;
+  padding: 0 12px;
+}
+
+.col-time {
+  width: 23%;
+  min-width: 140px;
+  flex-shrink: 0;
+  padding: 0 12px;
+}
+
+.col-ops {
+  width: 10%;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-left: 16px;
+}
+
+/* 行：h-44 + mb-6 = 50（与 ITEM_HEIGHT 一致） */
+.fm-row {
+  display: flex;
+  align-items: center;
+  height: 44px;
+  margin-bottom: 6px;
+  padding: 0 16px;
+  border-radius: 8px;
+  font-size: 14px;
+  color: var(--gf-text-regular);
+  cursor: default;
+  transition: background 0.15s;
+}
+
+.fm-row:hover {
+  background: var(--gf-bg-elevated);
+}
+
+.fm-row.is-dir {
+  cursor: pointer;
+}
+
+.fm-icon {
+  width: 25px;
+  height: 25px;
+  flex-shrink: 0;
+}
+
+.fm-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  color: var(--gf-text-primary);
+  text-decoration: none;
+}
+
+.fm-name.link {
+  cursor: pointer;
+}
+
+.fm-name.link:hover {
+  color: var(--gf-primary);
+}
+
+.col-size,
+.col-time {
+  color: var(--gf-text-secondary);
+  font-size: 12px;
+}
+
+/* 更多操作：hover 行时显示，hover 命中区加大更易触发 */
+.fm-more-hit {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  height: 44px;
+  width: 100%;
+}
+
+.fm-more {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--gf-text-tertiary);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
+}
+
+.fm-row:hover .fm-more,
+.fm-more.active {
+  opacity: 1;
+}
+
+.fm-more:hover,
+.fm-more.active {
+  background: var(--gf-bg-elevated-hover);
+  color: var(--gf-text-primary);
+}
+
+.fm-empty {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--gf-text-disabled);
+  font-size: 14px;
+}
+
+.fm-input {
+  width: 100%;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--gf-border-strong);
+  border-radius: 10px;
+  font-size: 14px;
+  color: var(--gf-text-primary);
+  background: var(--gf-bg-panel);
+  box-sizing: border-box;
+  outline: none;
+  font-family: inherit;
+}
+
+.fm-input:focus {
+  border-color: var(--gf-primary);
+}
+</style>
+
+<!-- 行内更多菜单：Teleport 到 body，需非 scoped 样式（对齐 TeamFileRowMenu：w-160 rounded-10 border shadow，项 h-32 rounded-8） -->
+<style>
+.fm-row-menu {
+  position: fixed;
+  z-index: 2100;
+  width: 160px;
+  padding: 4px;
+  background: var(--gf-bg-panel);
+  border: 1px solid var(--gf-border);
+  border-radius: 10px;
+  box-shadow: var(--gf-shadow-menu);
+}
+
+.fm-row-menu-item {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 8px;
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--gf-text-regular);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.fm-row-menu-item:hover {
+  background: var(--gf-bg-elevated);
+}
+
+.fm-row-menu-item.danger {
+  color: var(--gf-danger);
+}
+
+.fm-row-menu-item.danger:hover {
+  background: var(--gf-danger-bg);
+}
+</style>
