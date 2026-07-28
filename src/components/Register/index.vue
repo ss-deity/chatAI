@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import { ElMessage } from 'element-plus'
 
 interface RegisterUser {
   id: string
@@ -55,6 +56,7 @@ async function handleRegister() {
       return
     }
 
+    ElMessage.success('注册成功')
     emit('register', data.data)
   } catch (e) {
     errorMsg.value = '网络错误: ' + (e as Error).message
@@ -136,7 +138,7 @@ function handleKeyDown(e: KeyboardEvent) {
   z-index: 1000;
   display: grid;
   place-items: center;
-  background: #f5f7fb;
+  background: var(--gf-bg-page);
 }
 
 .register-container {
@@ -146,24 +148,25 @@ function handleKeyDown(e: KeyboardEvent) {
 }
 
 .register-card {
-  background: #fff;
+  background: var(--gf-bg-panel);
+  border: 1px solid var(--gf-border);
   border-radius: 12px;
   padding: 48px 36px;
-  box-shadow: 0 0 30px 0 rgba(0, 0, 0, 0.08);
+  box-shadow: var(--gf-shadow-card);
 }
 
 .register-title {
   margin: 0 0 8px;
   font-size: 24px;
   font-weight: 600;
-  color: #030b1a;
+  color: var(--gf-text-primary);
   text-align: center;
 }
 
 .register-subtitle {
   margin: 0 0 32px;
   font-size: 14px;
-  color: #8c8c8c;
+  color: var(--gf-text-tertiary);
   text-align: center;
 }
 
@@ -181,28 +184,28 @@ function handleKeyDown(e: KeyboardEvent) {
   width: 100%;
   height: 48px;
   padding: 0 16px;
-  border: 1px solid #e4e9f1;
+  border: 1px solid var(--gf-border-strong);
   border-radius: 10px;
   font-size: 14px;
-  color: #030b1a;
-  background: #f5f7fb;
+  color: var(--gf-text-primary);
+  background: var(--gf-bg-input);
   outline: none;
-  transition: border-color 0.2s;
+  transition: border-color 0.2s, background-color 0.2s;
   box-sizing: border-box;
 }
 
 .form-input:focus {
-  border-color: #1677ff;
-  background: #fff;
+  border-color: var(--gf-primary);
+  background: var(--gf-bg-panel);
 }
 
 .form-input::placeholder {
-  color: #bfbfbf;
+  color: var(--gf-text-placeholder);
 }
 
 .error-msg {
   font-size: 13px;
-  color: #e64340;
+  color: var(--gf-danger);
   text-align: center;
 }
 
@@ -211,17 +214,18 @@ function handleKeyDown(e: KeyboardEvent) {
   height: 48px;
   border: none;
   border-radius: 10px;
-  background: #030b1a;
-  color: #fff;
+  background: var(--gf-accent);
+  color: var(--gf-bg-panel);
   font-size: 16px;
   font-weight: 500;
   cursor: pointer;
-  transition: opacity 0.2s;
+  transition: opacity 0.2s, background-color 0.2s;
   margin-top: 8px;
 }
 
 .register-btn:hover:not(.loading) {
-  opacity: 0.9;
+  background: var(--gf-accent-hover);
+  opacity: 0.95;
 }
 
 .register-btn.loading {
@@ -232,12 +236,12 @@ function handleKeyDown(e: KeyboardEvent) {
 .switch-link {
   text-align: center;
   font-size: 13px;
-  color: #8c8c8c;
+  color: var(--gf-text-tertiary);
   margin-top: 4px;
 }
 
 .link {
-  color: #1677ff;
+  color: var(--gf-primary);
   cursor: pointer;
 }
 

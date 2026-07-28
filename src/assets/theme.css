@@ -1,0 +1,158 @@
+/**
+ * 全局主题变量（light / dark）
+ * 参考 pc-genflow-pro 的换肤实现：通过 <html data-theme="..."> 切换根变量，
+ * 所有组件消费 CSS 变量，切换主题即可平滑联动。
+ */
+
+:root,
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  /* 背景 */
+  --gf-bg-page: #f5f7fb;
+  --gf-bg-panel: #ffffff;
+  --gf-bg-elevated: #f5f7fa;
+  --gf-bg-elevated-hover: #ebeef5;
+  --gf-bg-input: #f5f7fb;
+  --gf-bg-mask: rgba(3, 11, 26, 0.45);
+
+  /* 边框 / 分隔线 */
+  --gf-border: #ebeef5;
+  --gf-border-strong: #e4e9f1;
+  --gf-divider: #f0f2f5;
+
+  /* 文本 */
+  --gf-text-primary: #030b1a;
+  --gf-text-regular: #333333;
+  --gf-text-secondary: #4b5563;
+  --gf-text-tertiary: #8c8c8c;
+  --gf-text-placeholder: #bfbfbf;
+  --gf-text-disabled: #a2abbd;
+
+  /* 主色 / 品牌色 */
+  --gf-primary: #1677ff;
+  --gf-primary-hover: #4096ff;
+  --gf-primary-bg: #ecf5ff;
+  --gf-primary-inverse: #ffffff;
+
+  /* 深色主按钮（登录/注册/主要弹窗） */
+  --gf-accent: #030b1a;
+  --gf-accent-hover: #1a2333;
+
+  /* 危险色 */
+  --gf-danger: #e64340;
+  --gf-danger-hover: #d5352f;
+  --gf-danger-bg: #fef0f0;
+  --gf-danger-border: #fde2e2;
+
+  /* 消息气泡 */
+  --gf-bubble-user-bg: #1677ff;
+  --gf-bubble-user-text: #ffffff;
+  --gf-bubble-assistant-bg: #f0f2f5;
+  --gf-bubble-assistant-text: #333333;
+
+  /* 阴影 */
+  --gf-shadow-card: 0 0 30px 0 rgba(0, 0, 0, 0.08);
+  --gf-shadow-menu: 0 6px 14px 0 rgba(0, 0, 0, 0.1);
+  --gf-shadow-dialog: 0 20px 40px 0 rgba(3, 11, 26, 0.16);
+
+  /* 代码块 */
+  --gf-code-bg: #0f172a;
+  --gf-code-text: #e2e8f0;
+
+  /* 滚动条（pc-genflow-pro 风格：细窄、圆角、hover 加深） */
+  --gf-scrollbar-thumb: rgba(3, 11, 26, 0.18);
+  --gf-scrollbar-thumb-hover: rgba(3, 11, 26, 0.32);
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  /* 背景 */
+  --gf-bg-page: #0f172a;
+  --gf-bg-panel: #16213e;
+  --gf-bg-elevated: #1e2a44;
+  --gf-bg-elevated-hover: #263553;
+  --gf-bg-input: #1a2540;
+  --gf-bg-mask: rgba(0, 0, 0, 0.6);
+
+  /* 边框 / 分隔线 */
+  --gf-border: #2c3a52;
+  --gf-border-strong: #3a4a68;
+  --gf-divider: #223052;
+
+  /* 文本 */
+  --gf-text-primary: #f1f5f9;
+  --gf-text-regular: #e2e8f0;
+  --gf-text-secondary: #cbd5e1;
+  --gf-text-tertiary: #94a3b8;
+  --gf-text-placeholder: #64748b;
+  --gf-text-disabled: #64748b;
+
+  /* 主色 / 品牌色 */
+  --gf-primary: #4c8bff;
+  --gf-primary-hover: #6ba1ff;
+  --gf-primary-bg: #1e3057;
+  --gf-primary-inverse: #ffffff;
+
+  /* 深色主按钮 */
+  --gf-accent: #f1f5f9;
+  --gf-accent-hover: #ffffff;
+
+  /* 危险色 */
+  --gf-danger: #ff6b6b;
+  --gf-danger-hover: #ff5252;
+  --gf-danger-bg: #3a1f1f;
+  --gf-danger-border: #4a2828;
+
+  /* 消息气泡 */
+  --gf-bubble-user-bg: #4c8bff;
+  --gf-bubble-user-text: #ffffff;
+  --gf-bubble-assistant-bg: #1e2a44;
+  --gf-bubble-assistant-text: #e2e8f0;
+
+  /* 阴影 */
+  --gf-shadow-card: 0 0 30px 0 rgba(0, 0, 0, 0.4);
+  --gf-shadow-menu: 0 6px 14px 0 rgba(0, 0, 0, 0.5);
+  --gf-shadow-dialog: 0 20px 40px 0 rgba(0, 0, 0, 0.6);
+
+  /* 代码块 */
+  --gf-code-bg: #0b1220;
+  --gf-code-text: #e2e8f0;
+
+  /* 滚动条 */
+  --gf-scrollbar-thumb: rgba(226, 232, 240, 0.18);
+  --gf-scrollbar-thumb-hover: rgba(226, 232, 240, 0.35);
+}
+
+/* ============================================
+ * 全局滚动条（参考 pc-genflow-pro 风格：
+ * 6px 细宽、透明轨道、圆角滑块、hover 加深）
+ * ============================================ */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--gf-scrollbar-thumb) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--gf-scrollbar-thumb);
+  border-radius: 3px;
+  transition: background 0.15s ease;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--gf-scrollbar-thumb-hover);
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
