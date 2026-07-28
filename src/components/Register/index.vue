@@ -4,7 +4,9 @@ import { ElMessage } from 'element-plus'
 
 interface RegisterUser {
   id: string
+  uid: string
   username: string
+  nickname: string
   avatar: string
 }
 

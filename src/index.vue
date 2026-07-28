@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, reactive, computed, nextTick, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
@@ -7,8 +8,12 @@ import SideBar from './components/SideBar/index.vue'
 import LoginPage from './components/Login/index.vue'
 import RegisterPage from './components/Register/index.vue'
 import SettingsPanel from './components/Settings/index.vue'
+import FileManager from './components/FileManager/index.vue'
 import { fetchSSE, cancelSSE } from './utils/sse'
 import type { SSEController } from './utils/sse'
+
+const route = useRoute()
+const router = useRouter()
 
 // marked 配置：兼容 GFM，换行转 <br>，同步返回字符串（用于流式渲染）
 marked.setOptions({
@@ -29,7 +34,9 @@ interface ChatConversation {
 
 interface UserInfo {
   id: string
+  uid: string
   username: string
+  nickname: string
   avatar: string
 }
 
@@ -516,8 +523,16 @@ function handleKeyDown(e: KeyboardEvent) {
  * "新建对话"：仅切换视图到"空白新对话"状态。已有会话（若在流式）继续在后台流式，不做任何中止。
  */
 function handleNewChat() {
+  if (route.path !== '/') router.push('/')
   activeChatId.value = ''
   inputText.value = ''
+}
+
+/**
+ * 打开文件管理页：跳转到 /files 路由。
+ */
+function handleOpenFileManager() {
+  if (route.path !== '/files') router.push('/files')
 }
 
 /**
@@ -525,6 +540,7 @@ function handleNewChat() {
  * 首次进入某会话时从服务端加载历史消息；已在内存中的（含仍在流式的）直接沿用现有状态。
  */
 async function handleSelectChat(id: string) {
+  if (route.path !== '/') router.push('/')
   activeChatId.value = id
   inputText.value = ''
   if (!sessionStates[id]) {
@@ -555,11 +571,13 @@ async function handleSelectChat(id: string) {
       :active-id="activeChatId"
       :conversations="conversations"
       :user="currentUser"
+      :active-view="route.path === '/files' ? 'files' : 'chat'"
       @new-chat="handleNewChat"
       @select="handleSelectChat"
       @delete="handleDeleteChat"
       @logout="handleLogout"
       @open-settings="showSettings = true"
+      @open-file-manager="handleOpenFileManager"
     />
 
     <!-- 设置面板 -->
@@ -569,7 +587,11 @@ async function handleSelectChat(id: string) {
       @close="showSettings = false"
       @update-user="handleUpdateUser"
     />
-    <div class="main-container">
+
+    <!-- 文件管理页 -->
+    <FileManager v-if="route.path === '/files'" :user="currentUser" />
+
+    <div v-else class="main-container">
       <div class="chat-wrapper" :class="{ 'has-work': messages.length > 0 }">
         <!-- 消息列表 -->
         <div

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="56" viewBox="0 0 48 56">
+  <path d="M5 2 Q3 2 3 4 L3 52 Q3 54 5 54 L43 54 Q45 54 45 52 L45 17 L30 2 Z" fill="#ffffff" stroke="#d9d9d9" stroke-width="1" stroke-linejoin="round"/>
+  <path d="M30 2 L30 13 Q30 17 34 17 L45 17 Z" fill="#f5f5f5" stroke="#d9d9d9" stroke-width="1" stroke-linejoin="round"/>
+  <path d="M3 38 L45 38 L45 52 Q45 54 43 54 L5 54 Q3 54 3 52 Z" fill="#FF9800"/>
+  <text x="24" y="49" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700" font-family="Arial, Helvetica, sans-serif">PPT</text>
+</svg>
