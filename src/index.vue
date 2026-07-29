@@ -9,6 +9,9 @@ import LoginPage from './components/Login/index.vue'
 import RegisterPage from './components/Register/index.vue'
 import SettingsPanel from './components/Settings/index.vue'
 import FileManager from './components/FileManager/index.vue'
+import ModelSelect from './components/ModelSelect/index.vue'
+import ImageCard from './components/ImageCard/index.vue'
+import { DEFAULT_MODEL_TYPE } from './config/models'
 import { fetchSSE, cancelSSE } from './utils/sse'
 import type { SSEController } from './utils/sse'
 
@@ -25,6 +28,8 @@ marked.setOptions({
 interface Message {
   role: 'user' | 'assistant'
   content: string
+  /** 生成的图片（如即梦图片生成），按图片组件渲染 */
+  images?: string[]
 }
 
 interface ChatConversation {
@@ -62,6 +67,9 @@ const chatListRef = ref<HTMLElement | null>(null)
 const inputRef = ref<HTMLTextAreaElement | null>(null)
 const activeChatId = ref('')
 const conversations = ref<ChatConversation[]>([])
+
+/** 当前选中的模型 type（默认 DeepSeek-V4），发送会话时随请求带给后端 */
+const selectedModel = ref(DEFAULT_MODEL_TYPE)
 
 /**
  * 是否处于"贴底"状态。用户手动上滑查看历史时置为 false，
@@ -256,10 +264,11 @@ function renderMarkdown(content: string): string {
   }
 }
 
-function normalizeMessages(rawMessages: Array<{ role: string; content: string }> | undefined): Message[] {
+function normalizeMessages(rawMessages: Array<{ role: string; content: string; images?: string[] }> | undefined): Message[] {
   return (rawMessages ?? []).map((item) => ({
     role: item.role === 'assistant' ? 'assistant' : 'user',
     content: item.content ?? '',
+    images: item.images && item.images.length ? item.images : undefined,
   }))
 }
 
@@ -402,6 +411,8 @@ function handleSubmit() {
   if (currentUser.value?.id) {
     requestBody.userId = Number(currentUser.value.id)
   }
+  // 带上当前选中的模型 type，后端据此选择对应模型
+  requestBody.model = selectedModel.value
 
   // 用闭包变量跟踪当前会话 key，收到真实 conversationId 时会重命名
   let currentKey = key
@@ -440,6 +451,19 @@ function handleSubmit() {
           id: nextId,
           name: text.slice(0, 50) || '新对话',
         })
+      }
+      // 统一图片增量：后端归一化后的 images 字段，前端按图片组件渲染
+      const imgs = (payload.choices as Array<{ delta?: { images?: string[] } }> | undefined)?.[0]?.delta?.images
+      if (imgs && imgs.length) {
+        const s = sessionStates[currentKey]
+        const idx = s?.assistantIndex ?? -1
+        if (s && idx >= 0 && idx < s.messages.length) {
+          s.messages[idx] = {
+            ...s.messages[idx],
+            images: [...(s.messages[idx].images ?? []), ...imgs],
+          }
+          if (activeChatId.value === currentKey) scrollToBottom()
+        }
       }
     },
     onMessage(content) {
@@ -609,8 +633,10 @@ async function handleSelectChat(id: string) {
               <div
                 v-if="msg.role === 'assistant'"
                 class="message-bubble markdown-body"
-                v-html="renderMarkdown(msg.content)"
-              ></div>
+              >
+                <div v-if="msg.content" v-html="renderMarkdown(msg.content)"></div>
+                <ImageCard v-if="msg.images && msg.images.length" :images="msg.images" />
+              </div>
               <div v-else class="message-bubble">{{ msg.content }}</div>
             </div>
           </template>
@@ -632,6 +658,10 @@ async function handleSelectChat(id: string) {
               @input="autoResizeInput"
             ></textarea>
             <div class="chat-operate">
+              <div class="chat-operate-left">
+                <ModelSelect v-model="selectedModel" />
+              </div>
+              <div class="chat-operate-right">
               <!-- 生成中：暂停 + 终止 -->
               <template v-if="loading && !paused">
                 <button class="ctrl-btn pause-btn" title="暂停生成" @click="handlePause">
@@ -674,6 +704,7 @@ async function handleSelectChat(id: string) {
               >
                 发送
               </button>
+              </div>
             </div>
           </div>
           <div v-if="messages.length > 0" class="footer-ai-tips">
@@ -946,10 +977,22 @@ html, body, #app {
 
 .chat-operate {
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
   align-items: center;
   gap: 8px;
   padding-top: 10px;
+}
+
+.chat-operate-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat-operate-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .send-btn {
