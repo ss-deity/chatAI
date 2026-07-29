@@ -11,7 +11,7 @@ import SettingsPanel from './components/Settings/index.vue'
 import FileManager from './components/FileManager/index.vue'
 import ModelSelect from './components/ModelSelect/index.vue'
 import ImageCard from './components/ImageCard/index.vue'
-import { DEFAULT_MODEL_TYPE } from './config/models'
+import { DEFAULT_MODEL_TYPE, getModel } from './config/models'
 import { fetchSSE, cancelSSE } from './utils/sse'
 import type { SSEController } from './utils/sse'
 
@@ -35,6 +35,8 @@ interface Message {
 interface ChatConversation {
   id: string
   name: string
+  /** 最近活跃时间（ISO 字符串），用于侧边栏按日期分组 */
+  updatedAt?: string
 }
 
 interface UserInfo {
@@ -70,6 +72,19 @@ const conversations = ref<ChatConversation[]>([])
 
 /** 当前选中的模型 type（默认 DeepSeek-V4），发送会话时随请求带给后端 */
 const selectedModel = ref(DEFAULT_MODEL_TYPE)
+
+/** 深度思考（reasoning）开关，默认关闭；只有支持的模型（如 DeepSeek）显示按钮 */
+const deepThinking = ref(false)
+
+/** 当前模型是否支持"深度思考" */
+const supportsThinking = computed(
+  () => getModel(selectedModel.value).supportsThinking === true,
+)
+
+/** 切模型时，若新模型不支持深度思考则自动关闭，避免残留状态 */
+watch(selectedModel, () => {
+  if (!supportsThinking.value) deepThinking.value = false
+})
 
 /**
  * 是否处于"贴底"状态。用户手动上滑查看历史时置为 false，
@@ -124,6 +139,10 @@ onMounted(() => {
       isLoggedIn.value = true
       void refreshCurrentUser()
       void loadConversations()
+      // 刷新时若 URL 指向某个会话，直接打开它（停留在当前会话，不跳回首页）
+      if (route.name === 'chat' && route.params.id) {
+        void openConversation(String(route.params.id))
+      }
     } catch {
       localStorage.removeItem('chatai_auth')
     }
@@ -301,10 +320,13 @@ async function loadConversations() {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`)
     }
     const data = await response.json()
-    conversations.value = (data ?? []).map((item: { id: number; title: string }) => ({
-      id: String(item.id),
-      name: item.title || '新对话',
-    }))
+    conversations.value = (data ?? []).map(
+      (item: { id: number; title: string; updatedAt?: string }) => ({
+        id: String(item.id),
+        name: item.title || '新对话',
+        updatedAt: item.updatedAt,
+      }),
+    )
   } catch (error) {
     console.error('加载会话列表失败', error)
   }
@@ -350,9 +372,10 @@ async function handleDeleteChat(id: string) {
     // 清空会话本地状态
     delete sessionStates[id]
 
-    // 若删除的是当前打开会话，回到"新对话"状态
+    // 若删除的是当前打开会话，回到"新对话"状态并清掉 URL 上的会话 id
     if (activeChatId.value === id) {
       activeChatId.value = ''
+      if (route.name === 'chat') router.push('/')
     }
     ElMessage.success('已删除会话')
   } catch (error) {
@@ -413,6 +436,10 @@ function handleSubmit() {
   }
   // 带上当前选中的模型 type，后端据此选择对应模型
   requestBody.model = selectedModel.value
+  // 深度思考开关（仅对支持的模型有意义），默认关闭，开启时后端会附带 thinking 参数
+  if (deepThinking.value && supportsThinking.value) {
+    requestBody.thinking = true
+  }
 
   // 用闭包变量跟踪当前会话 key，收到真实 conversationId 时会重命名
   let currentKey = key
@@ -441,6 +468,10 @@ function handleSubmit() {
         }
         if (activeChatId.value === currentKey) {
           activeChatId.value = nextId
+          // 新会话拿到真实 id：把 URL 同步为 /chat/:id，刷新后仍停留在该会话
+          if (String(route.params.id) !== nextId) {
+            router.replace(`/chat/${nextId}`)
+          }
         }
         currentKey = nextId
       }
@@ -450,6 +481,7 @@ function handleSubmit() {
         conversations.value.unshift({
           id: nextId,
           name: text.slice(0, 50) || '新对话',
+          updatedAt: new Date().toISOString(),
         })
       }
       // 统一图片增量：后端归一化后的 images 字段，前端按图片组件渲染
@@ -544,27 +576,25 @@ function handleKeyDown(e: KeyboardEvent) {
 }
 
 /**
- * "新建对话"：仅切换视图到"空白新对话"状态。已有会话（若在流式）继续在后台流式，不做任何中止。
+ * "新建对话"：切换到空白新对话状态并回到首页路由（URL 不带会话 id）。
  */
 function handleNewChat() {
-  if (route.path !== '/') router.push('/')
   activeChatId.value = ''
   inputText.value = ''
+  if (route.name !== 'home') router.push('/')
 }
 
 /**
  * 打开文件管理页：跳转到 /files 路由。
  */
 function handleOpenFileManager() {
-  if (route.path !== '/files') router.push('/files')
+  if (route.name !== 'files') router.push('/files')
 }
 
 /**
- * 切换到某个已有会话：仅切换 activeChatId，不影响其他会话的流。
- * 首次进入某会话时从服务端加载历史消息；已在内存中的（含仍在流式的）直接沿用现有状态。
+ * 打开某个会话（加载/沿用其状态）。作为路由变化的统一入口，保证刷新/前进后退一致。
  */
-async function handleSelectChat(id: string) {
-  if (route.path !== '/') router.push('/')
+async function openConversation(id: string) {
   activeChatId.value = id
   inputText.value = ''
   if (!sessionStates[id]) {
@@ -574,6 +604,58 @@ async function handleSelectChat(id: string) {
     scrollToBottom(true)
   }
 }
+
+/**
+ * 点击侧边栏会话：把会话 id 写到 URL（/chat/:id），由路由 watch 统一打开，
+ * 这样刷新时仍停留在当前会话。
+ */
+function handleSelectChat(id: string) {
+  if (String(route.params.id) !== id) {
+    router.push(`/chat/${id}`)
+  } else {
+    void openConversation(id)
+  }
+}
+
+/**
+ * 重命名会话：调用后端并更新本地列表。
+ */
+async function handleRenameConversation(id: string, newName: string) {
+  const title = newName.trim()
+  if (!title) return
+  try {
+    const res = await fetch(`/api/conversations/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title }),
+    })
+    const data = await res.json()
+    if (data.code !== 0) throw new Error(data.message || '重命名失败')
+    const conv = conversations.value.find((c) => c.id === id)
+    if (conv) conv.name = title
+    ElMessage.success('已重命名')
+  } catch (e) {
+    ElMessage.error('重命名失败: ' + (e as Error).message)
+  }
+}
+
+// 路由 -> 会话：根据 URL 打开对应会话；无会话 id（首页）时回到新对话
+watch(
+  () => route.fullPath,
+  () => {
+    if (!isLoggedIn.value) return
+    if (route.name === 'chat' && route.params.id) {
+      const id = String(route.params.id)
+      if (id !== activeChatId.value) void openConversation(id)
+    } else if (route.name === 'home') {
+      if (activeChatId.value !== '') {
+        activeChatId.value = ''
+        inputText.value = ''
+      }
+    }
+  },
+)
+
 </script>
 
 <template>
@@ -595,10 +677,11 @@ async function handleSelectChat(id: string) {
       :active-id="activeChatId"
       :conversations="conversations"
       :user="currentUser"
-      :active-view="route.path === '/files' ? 'files' : 'chat'"
+      :active-view="route.name === 'files' ? 'files' : 'chat'"
       @new-chat="handleNewChat"
       @select="handleSelectChat"
       @delete="handleDeleteChat"
+      @rename="handleRenameConversation"
       @logout="handleLogout"
       @open-settings="showSettings = true"
       @open-file-manager="handleOpenFileManager"
@@ -613,7 +696,7 @@ async function handleSelectChat(id: string) {
     />
 
     <!-- 文件管理页 -->
-    <FileManager v-if="route.path === '/files'" :user="currentUser" />
+    <FileManager v-if="route.name === 'files'" :user="currentUser" />
 
     <div v-else class="main-container">
       <div class="chat-wrapper" :class="{ 'has-work': messages.length > 0 }">
@@ -626,7 +709,7 @@ async function handleSelectChat(id: string) {
         >
           <template v-for="(msg, idx) in messages" :key="idx">
             <div
-              v-if="!(loading && msg.role === 'assistant' && msg.content === '')"
+              v-if="!(loading && msg.role === 'assistant' && msg.content === '' && (!msg.images || msg.images.length === 0) && idx === messages.length - 1)"
               class="message-item"
               :class="msg.role"
             >
@@ -640,9 +723,20 @@ async function handleSelectChat(id: string) {
               <div v-else class="message-bubble">{{ msg.content }}</div>
             </div>
           </template>
-          <div v-if="loading && messages[messages.length - 1]?.content === ''" class="message-item assistant">
+          <div
+            v-if="loading && messages[messages.length - 1]?.role === 'assistant' && messages[messages.length - 1]?.content === '' && (!messages[messages.length - 1]?.images || messages[messages.length - 1]?.images?.length === 0)"
+            class="message-item assistant"
+          >
             <div class="message-bubble thinking">思考中...</div>
           </div>
+        </div>
+
+        <!-- 首屏 Hero 标题：仅无消息时显示 -->
+        <div v-if="messages.length === 0" class="hero-block">
+          <h1 class="hero-title">
+            <span class="hero-title-text">ChatAI</span>
+          </h1>
+          <p class="hero-subtitle">简单对话，智能创造</p>
         </div>
 
         <!-- 输入区域 -->
@@ -659,6 +753,35 @@ async function handleSelectChat(id: string) {
             ></textarea>
             <div class="chat-operate">
               <div class="chat-operate-left">
+                <button
+                  v-if="supportsThinking"
+                  type="button"
+                  class="thinking-btn"
+                  :class="{ active: deepThinking }"
+                  :title="deepThinking ? '已开启深度思考' : '开启深度思考'"
+                  @click="deepThinking = !deepThinking"
+                >
+                  <svg class="thinking-icon" width="15" height="15" viewBox="0 0 16 16" fill="none">
+                    <!-- 大脑轮廓：左右两瓣 + 中缝 -->
+                    <path
+                      d="M6.2 2.3a2 2 0 013.6 0 2 2 0 012.4 2v.2a2.2 2.2 0 011 3.5 2.2 2.2 0 01-.8 3.3 2 2 0 01-2.4 2.3 2 2 0 01-3.6 0 2 2 0 01-2.4-2.3 2.2 2.2 0 01-.8-3.3 2.2 2.2 0 011-3.5V4.3a2 2 0 012-2z"
+                      stroke="currentColor"
+                      stroke-width="1.1"
+                      stroke-linejoin="round"
+                    />
+                    <path d="M8 2.5v11" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/>
+                    <!-- 灵感火花，激活时点亮 -->
+                    <circle
+                      cx="12.8"
+                      cy="3.2"
+                      r="1"
+                      :fill="deepThinking ? 'currentColor' : 'none'"
+                      stroke="currentColor"
+                      stroke-width="1"
+                    />
+                  </svg>
+                  <span>深度思考</span>
+                </button>
                 <ModelSelect v-model="selectedModel" />
               </div>
               <div class="chat-operate-right">
@@ -759,6 +882,96 @@ html, body, #app {
 
 .chat-wrapper.has-work {
   justify-content: flex-start;
+}
+
+/* 首屏 Hero 标题 */
+.hero-block {
+  width: calc(100% - 40px);
+  max-width: 800px;
+  margin: 0 auto 24px;
+  text-align: center;
+  user-select: none;
+  pointer-events: none;
+}
+
+.hero-title {
+  margin: 0 0 12px;
+  font-size: 40px;
+  line-height: 1.15;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  animation: heroTitleIn 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.hero-title-text {
+  background: linear-gradient(
+    120deg,
+    var(--gf-primary, #4f7cff) 0%,
+    #7a5cff 25%,
+    #ff6ab0 50%,
+    #7a5cff 75%,
+    var(--gf-primary, #4f7cff) 100%
+  );
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: heroGradientShift 6s ease-in-out infinite;
+  display: inline-block;
+}
+
+.hero-subtitle {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--gf-text-secondary, #8a94a6);
+  letter-spacing: 0.4px;
+  animation: heroSubtitleIn 0.7s cubic-bezier(0.22, 1, 0.36, 1) 0.15s both;
+}
+
+@keyframes heroTitleIn {
+  0% {
+    opacity: 0;
+    transform: translateY(12px) scale(0.98);
+    filter: blur(4px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+@keyframes heroSubtitleIn {
+  0% {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes heroGradientShift {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-title,
+  .hero-subtitle,
+  .hero-title-text {
+    animation: none;
+  }
 }
 
 .message-list {
@@ -987,6 +1200,39 @@ html, body, #app {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* 深度思考开关：与 ModelSelect 按钮风格一致，激活时以主色高亮 */
+.thinking-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--gf-border-strong);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--gf-text-regular);
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.thinking-btn:hover {
+  background: var(--gf-bg-elevated);
+  border-color: var(--gf-primary);
+  color: var(--gf-primary);
+}
+
+.thinking-btn.active {
+  background: var(--gf-primary-bg, rgba(79, 124, 255, 0.12));
+  border-color: var(--gf-primary);
+  color: var(--gf-primary);
+}
+
+.thinking-icon {
+  flex-shrink: 0;
 }
 
 .chat-operate-right {

@@ -12,7 +12,8 @@ const blank = { render: () => null }
 const router = createRouter({
   history: createWebHashHistory(),
   routes: [
-    { path: '/', name: 'chat', component: blank },
+    { path: '/', name: 'home', component: blank },
+    { path: '/chat/:id', name: 'chat', component: blank },
     { path: '/files', name: 'files', component: blank },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],

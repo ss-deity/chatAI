@@ -11,10 +11,18 @@ export interface ModelOption {
   capability?: 'text' | 'image'
   /** 简短描述 */
   desc?: string
+  /** 是否支持"深度思考"（reasoning）；仅对支持的模型显示对应按钮 */
+  supportsThinking?: boolean
 }
 
 export const MODELS: ModelOption[] = [
-  { type: 'deepseek-v4', label: 'DeepSeek-V4', capability: 'text', desc: '通用文本对话' },
+  {
+    type: 'deepseek-v4',
+    label: 'DeepSeek-V4',
+    capability: 'text',
+    desc: '通用文本对话',
+    supportsThinking: true,
+  },
   { type: 'jimeng-v4.6', label: 'JiMeng-V4.6', capability: 'image', desc: '即梦 AI 图片生成' },
 ]
 

@@ -5,6 +5,7 @@ import { ElMessage } from 'element-plus'
 interface ChatItem {
   id: string
   name: string
+  updatedAt?: string
 }
 
 interface UserInfo {
@@ -29,12 +30,37 @@ const emit = defineEmits<{
   openSettings: []
   openFileManager: []
   delete: [id: string]
+  rename: [id: string, newName: string]
 }>()
 
 const isFold = ref(false)
-const chatList = computed(() => props.conversations)
 const showUserMenu = ref(false)
 const activeMenuId = ref('')
+
+/**
+ * 按最近活跃时间把会话分组：今天 / 昨天 / 近7天 / 更早。
+ * 组内保持传入顺序（后端已按 updatedAt 倒序）。
+ */
+const groupedConversations = computed(() => {
+  const groups: { label: string; items: ChatItem[] }[] = [
+    { label: '今天', items: [] },
+    { label: '昨天', items: [] },
+    { label: '近7天', items: [] },
+    { label: '更早', items: [] },
+  ]
+  const now = new Date()
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  const dayMs = 24 * 60 * 60 * 1000
+
+  for (const item of props.conversations) {
+    const t = item.updatedAt ? new Date(item.updatedAt).getTime() : 0
+    if (t >= startOfToday) groups[0].items.push(item)
+    else if (t >= startOfToday - dayMs) groups[1].items.push(item)
+    else if (t >= startOfToday - 6 * dayMs) groups[2].items.push(item)
+    else groups[3].items.push(item)
+  }
+  return groups.filter((g) => g.items.length > 0)
+})
 
 // 退出确认弹窗
 const showLogoutDialog = ref(false)
@@ -86,6 +112,37 @@ function confirmDelete() {
   emit('delete', pendingDeleteItem.value.id)
   showDeleteDialog.value = false
   pendingDeleteItem.value = null
+}
+
+// 重命名会话弹窗
+const showRenameDialog = ref(false)
+const renameItem = ref<ChatItem | null>(null)
+const renameValue = ref('')
+
+function handleRenameChat(item: ChatItem, e: MouseEvent) {
+  e.stopPropagation()
+  activeMenuId.value = ''
+  renameItem.value = item
+  renameValue.value = item.name
+  showRenameDialog.value = true
+}
+
+function cancelRename() {
+  showRenameDialog.value = false
+  renameItem.value = null
+}
+
+function confirmRename() {
+  const name = renameValue.value.trim()
+  if (!renameItem.value || !name) {
+    showRenameDialog.value = false
+    return
+  }
+  if (name !== renameItem.value.name) {
+    emit('rename', renameItem.value.id, name)
+  }
+  showRenameDialog.value = false
+  renameItem.value = null
 }
 
 function handleGlobalClick() {
@@ -163,38 +220,50 @@ function handleSettings() {
       </div>
 
       <div class="history-list">
-        <div v-if="chatList.length === 0" class="empty-state">
+        <div v-if="props.conversations.length === 0" class="empty-state">
           暂无对话记录
         </div>
-        <div
-          v-for="item in chatList"
-          :key="item.id"
-          class="history-item"
-          :class="{ active: props.activeId === item.id, 'menu-open': activeMenuId === item.id }"
-          @click="handleSelect(item.id)"
-        >
-          <span class="history-item-title">{{ item.name }}</span>
-          <button
-            class="history-item-more"
-            :class="{ visible: activeMenuId === item.id }"
-            title="更多操作"
-            @click="(e) => toggleItemMenu(item.id, e)"
+        <template v-for="group in groupedConversations" :key="group.label">
+          <div class="history-group-label">{{ group.label }}</div>
+          <div
+            v-for="item in group.items"
+            :key="item.id"
+            class="history-item"
+            :class="{ active: props.activeId === item.id, 'menu-open': activeMenuId === item.id }"
+            @click="handleSelect(item.id)"
           >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <circle cx="3" cy="8" r="1.3" fill="currentColor"/>
-              <circle cx="8" cy="8" r="1.3" fill="currentColor"/>
-              <circle cx="13" cy="8" r="1.3" fill="currentColor"/>
+            <svg class="history-item-icon" width="15" height="15" viewBox="0 0 16 16" fill="none">
+              <path d="M2 4.2A1.7 1.7 0 013.7 2.5h8.6A1.7 1.7 0 0114 4.2v5.1a1.7 1.7 0 01-1.7 1.7H6.6l-3 2.3a.5.5 0 01-.8-.4v-1.9H3.7A1.7 1.7 0 012 9.3V4.2z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
             </svg>
-          </button>
-          <div v-if="activeMenuId === item.id" class="history-item-menu" @click.stop>
-            <div class="history-item-menu-btn danger" @click="(e) => handleDeleteChat(item, e)">
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                <path d="M2.5 4h11M6 4V2.5a1 1 0 011-1h2a1 1 0 011 1V4M12.5 4l-.6 8.6a1.5 1.5 0 01-1.5 1.4H5.6a1.5 1.5 0 01-1.5-1.4L3.5 4M6.5 7v4M9.5 7v4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+            <span class="history-item-title">{{ item.name }}</span>
+            <button
+              class="history-item-more"
+              :class="{ visible: activeMenuId === item.id }"
+              title="更多操作"
+              @click="(e) => toggleItemMenu(item.id, e)"
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <circle cx="3" cy="8" r="1.3" fill="currentColor"/>
+                <circle cx="8" cy="8" r="1.3" fill="currentColor"/>
+                <circle cx="13" cy="8" r="1.3" fill="currentColor"/>
               </svg>
-              <span>删除</span>
+            </button>
+            <div v-if="activeMenuId === item.id" class="history-item-menu" @click.stop>
+              <div class="history-item-menu-btn" @click="(e) => handleRenameChat(item, e)">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                  <path d="M11.5 2.5l2 2L6 12l-2.5.5L4 10 11.5 2.5z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                </svg>
+                <span>重命名</span>
+              </div>
+              <div class="history-item-menu-btn danger" @click="(e) => handleDeleteChat(item, e)">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                  <path d="M2.5 4h11M6 4V2.5a1 1 0 011-1h2a1 1 0 011 1V4M12.5 4l-.6 8.6a1.5 1.5 0 01-1.5 1.4H5.6a1.5 1.5 0 01-1.5-1.4L3.5 4M6.5 7v4M9.5 7v4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                <span>删除</span>
+              </div>
             </div>
           </div>
-        </div>
+        </template>
       </div>
 
       <!-- 底部用户区域 -->
@@ -333,6 +402,41 @@ function handleSettings() {
         </div>
       </transition>
     </Teleport>
+
+    <!-- 重命名会话弹窗（与退出弹窗同风格） -->
+    <Teleport to="body">
+      <transition name="gf-dialog">
+        <div
+          v-if="showRenameDialog"
+          class="gf-dialog-mask"
+          @click.self="cancelRename"
+        >
+          <div class="gf-dialog">
+            <div class="gf-dialog-header">
+              <h3 class="gf-dialog-title">重命名对话</h3>
+              <button class="gf-dialog-close" @click="cancelRename">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path d="M4 4L12 12M12 4L4 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+              </button>
+            </div>
+            <div class="gf-dialog-body">
+              <input
+                v-model="renameValue"
+                class="gf-rename-input"
+                maxlength="50"
+                placeholder="请输入会话名称"
+                @keydown.enter="confirmRename"
+              />
+            </div>
+            <div class="gf-dialog-footer">
+              <button class="gf-btn gf-btn-plain" @click="cancelRename">取消</button>
+              <button class="gf-btn gf-btn-primary" @click="confirmRename">确定</button>
+            </div>
+          </div>
+        </div>
+      </transition>
+    </Teleport>
   </div>
 </template>
 
@@ -360,6 +464,8 @@ function handleSettings() {
   flex-direction: column;
   height: 100%;
   padding: 16px 12px;
+  box-sizing: border-box;
+  min-height: 0;
 }
 
 .sidebar-header {
@@ -451,8 +557,16 @@ function handleSettings() {
 }
 
 .history-list {
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
+}
+
+.history-group-label {
+  font-size: 12px;
+  color: var(--gf-text-tertiary);
+  padding: 10px 12px 4px;
+  user-select: none;
 }
 
 .empty-state {
@@ -466,11 +580,21 @@ function handleSettings() {
   position: relative;
   display: flex;
   align-items: center;
+  gap: 8px;
   height: 40px;
   padding: 0 8px 0 12px;
   border-radius: 8px;
   cursor: pointer;
   transition: background 0.15s;
+}
+
+.history-item-icon {
+  flex-shrink: 0;
+  color: var(--gf-text-tertiary);
+}
+
+.history-item.active .history-item-icon {
+  color: var(--gf-primary);
 }
 
 .history-item:hover {
@@ -565,6 +689,7 @@ function handleSettings() {
 /* 底部用户区域 */
 .user-area {
   flex-shrink: 0;
+  flex-grow: 0;
   position: relative;
   border-top: 1px solid var(--gf-border);
   padding-top: 12px;
@@ -662,9 +787,11 @@ function handleSettings() {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding-top: 16px;
+  padding: 16px 0;
   gap: 8px;
   height: 100%;
+  box-sizing: border-box;
+  min-height: 0;
 }
 
 .fold-spacer {
@@ -680,7 +807,7 @@ function handleSettings() {
   justify-content: center;
   background: var(--gf-bg-elevated);
   cursor: pointer;
-  margin-bottom: 16px;
+  flex-shrink: 0;
   transition: background 0.15s;
   color: var(--gf-text-tertiary);
 }
@@ -760,6 +887,24 @@ function handleSettings() {
   line-height: 22px;
   color: var(--gf-text-secondary);
   padding: 4px 0 24px;
+}
+
+.gf-rename-input {
+  width: 100%;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--gf-border-strong);
+  border-radius: 10px;
+  font-size: 14px;
+  color: var(--gf-text-primary);
+  background: var(--gf-bg-panel);
+  box-sizing: border-box;
+  outline: none;
+  font-family: inherit;
+}
+
+.gf-rename-input:focus {
+  border-color: var(--gf-primary);
 }
 
 .gf-dialog-footer {
