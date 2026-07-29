@@ -114,7 +114,7 @@ async function confirmLogout() {
   if (logoutLoading.value) return
   logoutLoading.value = true
   try {
-    await fetch('http://localhost:3000/auth/logout', { method: 'POST' })
+    await fetch('/api/auth/logout', { method: 'POST' })
     showLogoutDialog.value = false
     ElMessage.success('已退出登录')
     emit('logout')

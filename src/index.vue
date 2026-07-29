@@ -134,7 +134,7 @@ async function refreshCurrentUser() {
   if (!currentUser.value?.id) return
   try {
     const response = await fetch(
-      `http://localhost:3000/users/${encodeURIComponent(currentUser.value.id)}`,
+      `/api/users/${encodeURIComponent(currentUser.value.id)}`,
     )
     if (!response.ok) return
     const result = await response.json()
@@ -162,7 +162,7 @@ function handleLogout() {
     controller.abort()
     const state = sessionStates[key]
     if (state?.sessionId) {
-      cancelSSE('http://localhost:3000', state.sessionId)
+      cancelSSE('/api', state.sessionId)
     }
   }
   sessionControllers.clear()
@@ -286,7 +286,7 @@ async function loadConversations() {
   }
   try {
     const response = await fetch(
-      `http://localhost:3000/conversations?userId=${encodeURIComponent(currentUser.value.id)}`,
+      `/api/conversations?userId=${encodeURIComponent(currentUser.value.id)}`,
     )
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`)
@@ -309,7 +309,7 @@ function abortSessionStream(key: string) {
   const controller = sessionControllers.get(key)
   controller?.abort()
   if (state?.sessionId) {
-    cancelSSE('http://localhost:3000', state.sessionId)
+    cancelSSE('/api', state.sessionId)
   }
   sessionControllers.delete(key)
   if (state) {
@@ -322,7 +322,7 @@ function abortSessionStream(key: string) {
 
 async function handleDeleteChat(id: string) {
   try {
-    const response = await fetch(`http://localhost:3000/conversations/${id}`, {
+    const response = await fetch(`/api/conversations/${id}`, {
       method: 'DELETE',
     })
     if (!response.ok) {
@@ -354,7 +354,7 @@ async function handleDeleteChat(id: string) {
 async function loadMessages(conversationId: string) {
   const state = ensureSession(conversationId)
   try {
-    const response = await fetch(`http://localhost:3000/conversations/${conversationId}/messages`)
+    const response = await fetch(`/api/conversations/${conversationId}/messages`)
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`)
     }
@@ -407,7 +407,7 @@ function handleSubmit() {
   let currentKey = key
 
   const controller = fetchSSE({
-    url: 'http://localhost:3000/chat',
+    url: '/api/chat',
     body: requestBody,
     onSessionId(sessionId) {
       const s = sessionStates[currentKey]

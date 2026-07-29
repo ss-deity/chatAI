@@ -29,7 +29,9 @@ export function fetchSSE(options: SSEOptions): SSEController {
   const abortController = new AbortController()
 
   let sessionId = ''
-  const baseUrl = new URL(url).origin
+  // 兼容相对地址（如 /api/chat）与绝对地址（如 http://host/chat）：
+  // pause/resume/cancel 的前缀 = 去掉末尾的 /chat 后的 base（相对时即 /api）。
+  const baseUrl = url.replace(/\/chat$/, '')
 
   const run = async () => {
     try {

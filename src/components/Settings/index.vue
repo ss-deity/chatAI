@@ -72,7 +72,7 @@ async function handleAvatarChange(e: Event) {
     const formData = new FormData()
     formData.append('file', file)
 
-    const res = await fetch(`http://localhost:3000/upload/avatar/${props.user.id}`, {
+    const res = await fetch(`/api/upload/avatar/${props.user.id}`, {
       method: 'POST',
       body: formData,
     })
@@ -113,7 +113,7 @@ async function handleNicknameSave() {
 
   savingNickname.value = true
   try {
-    const res = await fetch(`http://localhost:3000/users/${props.user.id}`, {
+    const res = await fetch(`/api/users/${props.user.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ nickname: name }),
