@@ -24,7 +24,7 @@ interface FileEntry {
 
 const props = defineProps<{ user: UserInfo | null }>()
 
-const BASE = 'http://localhost:3000'
+const BASE = '/api'
 
 // 文件类型图标：从 assets/file-icons 下按后缀映射
 const iconModules = import.meta.glob('../../assets/file-icons/*.svg', {
