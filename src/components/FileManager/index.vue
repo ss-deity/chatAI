@@ -2,6 +2,26 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useVirtualList } from '../../composables/useVirtualList'
+import ImagePreview from '../ImagePreview/index.vue'
+
+const IMAGE_EXT_SET = new Set([
+  'jpg',
+  'jpeg',
+  'png',
+  'gif',
+  'webp',
+  'bmp',
+  'svg',
+  'ico',
+  'avif',
+  'jfif',
+])
+
+function isImageFile(entry: { name: string; isDir: boolean; url?: string }): boolean {
+  if (entry.isDir || !entry.url) return false
+  const ext = entry.name.split('.').pop()?.toLowerCase() || ''
+  return IMAGE_EXT_SET.has(ext)
+}
 
 interface UserInfo {
   id: string
@@ -67,6 +87,22 @@ const { totalHeight, offsetY, visibleItems } = useVirtualList(
 )
 
 const showList = computed(() => !loading.value && entries.value.length > 0)
+
+/* --------------------------- 图片预览 --------------------------- */
+
+// 当前目录内所有图片文件（url 列表），预览时用于前后翻页
+const imageEntries = computed(() => entries.value.filter(isImageFile))
+const imageUrls = computed(() => imageEntries.value.map((e) => e.url as string))
+
+const previewVisible = ref(false)
+const previewIndex = ref(0)
+
+function openImagePreview(entry: FileEntry) {
+  const idx = imageEntries.value.findIndex((e) => e.path === entry.path)
+  if (idx < 0) return
+  previewIndex.value = idx
+  previewVisible.value = true
+}
 
 async function loadList() {
   if (!userId.value) return
@@ -410,8 +446,8 @@ onBeforeUnmount(cancelCloseTimer)
               v-for="{ item } in visibleItems"
               :key="item.path"
               class="fm-row"
-              :class="{ 'is-dir': item.isDir }"
-              @dblclick="enterFolder(item)"
+              :class="{ 'is-dir': item.isDir, 'is-image': isImageFile(item) }"
+              @dblclick="item.isDir ? enterFolder(item) : isImageFile(item) && openImagePreview(item)"
             >
               <div class="col-name">
                 <img :src="iconFor(item)" class="fm-icon" alt="" />
@@ -420,6 +456,12 @@ onBeforeUnmount(cancelCloseTimer)
                   class="fm-name link"
                   :title="item.name"
                   @click="enterFolder(item)"
+                >{{ item.name }}</span>
+                <span
+                  v-else-if="isImageFile(item)"
+                  class="fm-name link"
+                  :title="item.name"
+                  @click="openImagePreview(item)"
                 >{{ item.name }}</span>
                 <a
                   v-else-if="item.url"
@@ -454,6 +496,13 @@ onBeforeUnmount(cancelCloseTimer)
         </div>
       </div>
     </div>
+
+    <!-- 图片预览浮层：与会话中的 ImageCard 共用同一预览器 -->
+    <ImagePreview
+      v-model:visible="previewVisible"
+      :images="imageUrls"
+      :initial-index="previewIndex"
+    />
 
     <!-- 行内更多操作菜单（Teleport 到 body，fixed 定位，避免被虚拟列表 transform 裁剪） -->
     <Teleport to="body">
@@ -758,6 +807,10 @@ onBeforeUnmount(cancelCloseTimer)
   cursor: pointer;
 }
 
+.fm-row.is-image {
+  cursor: pointer;
+}
+
 .fm-icon {
   width: 25px;
   height: 25px;
@@ -793,7 +846,6 @@ onBeforeUnmount(cancelCloseTimer)
   align-items: center;
   justify-content: flex-end;
   height: 44px;
-  width: 100%;
 }
 
 .fm-more {

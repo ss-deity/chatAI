@@ -1,18 +1,22 @@
 <script setup lang="ts">
 /**
- * 会话图片渲染组件（参考 enterprise-ai-chat-plugin 的 WpImageCard，简化为仅下载）。
- * hover 图片时右下角出现下载按钮，点击通过 fetch->blob 触发浏览器下载。
+ * 会话图片渲染组件。
+ * - hover 图片时右下角出现下载按钮
+ * - 点击图片打开预览浮层（复用 ImagePreview 组件）
  */
 import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import ImagePreview from '../ImagePreview/index.vue'
 
-defineProps<{ images: string[] }>()
+const props = defineProps<{ images: string[] }>()
 
 const hoverIndex = ref(-1)
+const previewVisible = ref(false)
+const previewIndex = ref(0)
 
 function fileNameFromUrl(url: string): string {
   try {
-    const path = new URL(url).pathname
+    const path = new URL(url, window.location.origin).pathname
     const name = path.split('/').pop() || ''
     return name || `image_${Date.now()}.png`
   } catch {
@@ -37,10 +41,14 @@ async function download(url: string) {
       URL.revokeObjectURL(objUrl)
     }, 400)
   } catch {
-    // 跨域等失败时兜底：新开标签页
     window.open(url, '_blank')
     ElMessage.warning('已在新标签页打开图片，可右键保存')
   }
+}
+
+function openPreview(index: number) {
+  previewIndex.value = index
+  previewVisible.value = true
 }
 </script>
 
@@ -52,6 +60,7 @@ async function download(url: string) {
       class="image-card-item"
       @mouseenter="hoverIndex = index"
       @mouseleave="hoverIndex = -1"
+      @click="openPreview(index)"
     >
       <img class="image-card-img" :src="url" alt="" />
       <div v-show="hoverIndex === index" class="image-card-tools">
@@ -63,6 +72,12 @@ async function download(url: string) {
         </button>
       </div>
     </div>
+
+    <ImagePreview
+      v-model:visible="previewVisible"
+      :images="images"
+      :initial-index="previewIndex"
+    />
   </div>
 </template>
 
