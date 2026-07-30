@@ -11,8 +11,22 @@ import SettingsPanel from './components/Settings/index.vue'
 import FileManager from './components/FileManager/index.vue'
 import ModelSelect from './components/ModelSelect/index.vue'
 import ImageCard from './components/ImageCard/index.vue'
+import FileGrid from './components/FileGrid/index.vue'
 import { DEFAULT_MODEL_TYPE, getModel } from './config/models'
 import { fetchSSE, cancelSSE } from './utils/sse'
+import {
+  MODEL_UPLOAD_CONFIG,
+  checkFileFormat,
+  checkFileSize,
+  checkImageResolution,
+  compressImage,
+  uploadToServer,
+  nextAttachmentUid,
+  isImageMime,
+  type Attachment,
+  type RemoteAttachment,
+  type UploadConfig,
+} from './utils/uploadFile'
 import type { SSEController } from './utils/sse'
 
 const route = useRoute()
@@ -30,6 +44,8 @@ interface Message {
   content: string
   /** 生成的图片（如即梦图片生成），按图片组件渲染 */
   images?: string[]
+  /** 用户消息附带的附件（图片/文档），发消息时随请求上传给后端 */
+  attachments?: RemoteAttachment[]
 }
 
 interface ChatConversation {
@@ -84,7 +100,177 @@ const supportsThinking = computed(
 /** 切模型时，若新模型不支持深度思考则自动关闭，避免残留状态 */
 watch(selectedModel, () => {
   if (!supportsThinking.value) deepThinking.value = false
+  // 切模型时：新模型不接受的附件直接丢弃并 toast
+  const cfg = uploadConfig.value
+  if (!cfg) {
+    if (pendingAttachments.value.length) {
+      pendingAttachments.value = []
+      ElMessage.warning('当前模型不支持附件上传，已清空')
+    }
+    return
+  }
+  const before = pendingAttachments.value.length
+  pendingAttachments.value = pendingAttachments.value.filter((a) =>
+    checkFileFormat({ name: a.name, type: a.type }, cfg.fileType),
+  )
+  if (pendingAttachments.value.length < before) {
+    ElMessage.warning('部分附件不被当前模型支持，已移除')
+  }
+  if (pendingAttachments.value.length > cfg.maxCount) {
+    pendingAttachments.value = pendingAttachments.value.slice(0, cfg.maxCount)
+    ElMessage.warning(`当前模型最多允许 ${cfg.maxCount} 个附件`)
+  }
 })
+
+/* ---------- 附件上传 ---------- */
+
+/** 待发送附件；submit 成功后清空。上传中的项会被 submit 拦截 */
+const pendingAttachments = ref<Attachment[]>([])
+const fileInputRef = ref<HTMLInputElement | null>(null)
+
+/** 当前模型的上传规则，null 表示不支持上传 */
+const uploadConfig = computed<UploadConfig | null>(
+  () => MODEL_UPLOAD_CONFIG[selectedModel.value] ?? null,
+)
+
+const supportsUpload = computed(() => !!uploadConfig.value)
+
+const uploadAccept = computed(() => uploadConfig.value?.fileType ?? '')
+
+const uploadTooltip = computed(() => uploadConfig.value?.hitWord ?? '添加附件')
+
+function pickFile() {
+  if (!supportsUpload.value) return
+  if (!currentUser.value?.id) {
+    ElMessage.warning('请先登录再上传附件')
+    return
+  }
+  fileInputRef.value?.click()
+}
+
+async function onFileInputChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  const files = input.files
+  if (!files || !files.length) return
+  await handleFilesSelected(Array.from(files))
+  // 允许连续选同一文件
+  setTimeout(() => {
+    if (input) input.value = ''
+  }, 100)
+}
+
+/** 粘贴触发的图片上传（仅支持图片的模型下有意义） */
+async function onInputPaste(e: ClipboardEvent) {
+  if (!supportsUpload.value) return
+  const items = e.clipboardData?.items
+  if (!items || !items.length) return
+  const pastedFiles: File[] = []
+  for (let i = 0; i < items.length; i += 1) {
+    const it = items[i]
+    if (it.kind !== 'file') continue
+    const f = it.getAsFile?.()
+    if (f) pastedFiles.push(f)
+  }
+  if (!pastedFiles.length) return
+  e.preventDefault()
+  await handleFilesSelected(pastedFiles)
+}
+
+/** 统一入口：校验 -> 压缩 -> 上传，全流程带 UI 反馈 */
+async function handleFilesSelected(rawFiles: File[]) {
+  const cfg = uploadConfig.value
+  if (!cfg) {
+    ElMessage.warning('当前模型不支持附件上传')
+    return
+  }
+  const userId = currentUser.value?.id
+  if (!userId) {
+    ElMessage.warning('请先登录再上传附件')
+    return
+  }
+
+  // 1) 类型
+  let arr = rawFiles.filter((f) => {
+    const ok = checkFileFormat(f, cfg.fileType)
+    if (!ok) ElMessage.error(`${f.name} 格式不支持`)
+    return ok
+  })
+  // 2) 大小
+  arr = arr.filter(checkFileSize)
+  // 3) 图片分辨率（仅 jimeng 之类配置了 resolution 的场景）
+  if (cfg.resolution) {
+    const results = await Promise.all(arr.map((f) => checkImageResolution(f, cfg.resolution!)))
+    arr = arr.filter((_, i) => results[i])
+  }
+  if (!arr.length) return
+  // 4) 数量上限
+  const remaining = cfg.maxCount - pendingAttachments.value.length
+  if (remaining <= 0) {
+    ElMessage.error(`最多只能上传 ${cfg.maxCount} 个附件`)
+    return
+  }
+  if (arr.length > remaining) {
+    ElMessage.warning(`超过数量上限，仅保留前 ${remaining} 个`)
+    arr = arr.slice(0, remaining)
+  }
+  // 5) 图片按需压缩
+  arr = await Promise.all(
+    arr.map((f) => compressImage(f, cfg.maxImgCompressLimit, cfg.targetCompressMB)),
+  )
+
+  // 6) 生成本地占位并触发上传
+  for (const file of arr) {
+    const uid = nextAttachmentUid()
+    const thumbnail = isImageMime(file.type) ? URL.createObjectURL(file) : ''
+    const placeholder: Attachment = {
+      uid,
+      name: file.name,
+      type: file.type,
+      size: file.size,
+      thumbnail,
+      status: 'uploading',
+    }
+    pendingAttachments.value.push(placeholder)
+    // 异步上传，成功/失败回填状态
+    void uploadToServer(file, userId, 'chat')
+      .then((url) => {
+        const target = pendingAttachments.value.find((it) => it.uid === uid)
+        if (target) {
+          target.url = url
+          target.status = 'success'
+        }
+      })
+      .catch(() => {
+        const target = pendingAttachments.value.find((it) => it.uid === uid)
+        if (target) target.status = 'failed'
+        ElMessage.error(`${file.name} 上传失败`)
+      })
+  }
+}
+
+function removeAttachment(uid: string) {
+  const idx = pendingAttachments.value.findIndex((a) => a.uid === uid)
+  if (idx < 0) return
+  const target = pendingAttachments.value[idx]
+  // 释放本地 object URL
+  if (target.thumbnail && target.thumbnail.startsWith('blob:')) {
+    URL.revokeObjectURL(target.thumbnail)
+  }
+  pendingAttachments.value.splice(idx, 1)
+}
+
+/** 用于历史消息附件的只读展示：把 RemoteAttachment 转成 FileGrid 需要的形状 */
+function toAttachmentDisplay(list: RemoteAttachment[]): Attachment[] {
+  return list.map((a, i) => ({
+    uid: `hist_${i}_${a.url}`,
+    name: a.name,
+    type: a.type,
+    size: a.size,
+    thumbnail: isImageMime(a.type) ? a.url : '',
+    url: a.url,
+    status: 'success' as const,
+  }))
+}
 
 /**
  * 是否处于"贴底"状态。用户手动上滑查看历史时置为 false，
@@ -283,11 +469,12 @@ function renderMarkdown(content: string): string {
   }
 }
 
-function normalizeMessages(rawMessages: Array<{ role: string; content: string; images?: string[] }> | undefined): Message[] {
+function normalizeMessages(rawMessages: Array<{ role: string; content: string; images?: string[]; attachments?: RemoteAttachment[] }> | undefined): Message[] {
   return (rawMessages ?? []).map((item) => ({
     role: item.role === 'assistant' ? 'assistant' : 'user',
     content: item.content ?? '',
     images: item.images && item.images.length ? item.images : undefined,
+    attachments: item.attachments && item.attachments.length ? item.attachments : undefined,
   }))
 }
 
@@ -404,6 +591,12 @@ function handleSubmit() {
   const text = inputText.value.trim()
   if (!text) return
 
+  // 附件有上传中的项：先拦住，避免消息发出后 URL 还没回填
+  if (pendingAttachments.value.some((a) => a.status === 'uploading')) {
+    ElMessage.warning('附件还在上传，请稍候')
+    return
+  }
+
   // 决定这次提交所属会话 key：已选会话则用其 id，否则生成一个 pending key（新对话尚未落库）
   let key = activeChatId.value
   const isNew = !key
@@ -416,8 +609,22 @@ function handleSubmit() {
   // 当前会话已经在流式生成，避免重复提交（其他会话仍可以并发）
   if (state.loading) return
 
-  state.messages.push({ role: 'user', content: text })
+  // 只保留上传成功的附件，作为消息附件写入历史
+  const succAttachments: RemoteAttachment[] = pendingAttachments.value
+    .filter((a) => a.status === 'success' && a.url)
+    .map((a) => ({ url: a.url as string, name: a.name, type: a.type, size: a.size }))
+
+  state.messages.push({
+    role: 'user',
+    content: text,
+    attachments: succAttachments.length ? succAttachments : undefined,
+  })
   inputText.value = ''
+  // 清空输入区附件（本地缩略图释放 blob URL）
+  for (const a of pendingAttachments.value) {
+    if (a.thumbnail && a.thumbnail.startsWith('blob:')) URL.revokeObjectURL(a.thumbnail)
+  }
+  pendingAttachments.value = []
   state.messages.push({ role: 'assistant', content: '' })
   state.assistantIndex = state.messages.length - 1
   state.loading = true
@@ -439,6 +646,10 @@ function handleSubmit() {
   // 深度思考开关（仅对支持的模型有意义），默认关闭，开启时后端会附带 thinking 参数
   if (deepThinking.value && supportsThinking.value) {
     requestBody.thinking = true
+  }
+  // 附件（远端 URL）随请求发送，后端保存到用户 Message 并可传给模型
+  if (succAttachments.length) {
+    requestBody.attachments = succAttachments
   }
 
   // 用闭包变量跟踪当前会话 key，收到真实 conversationId 时会重命名
@@ -718,9 +929,23 @@ watch(
                 class="message-bubble markdown-body"
               >
                 <div v-if="msg.content" v-html="renderMarkdown(msg.content)"></div>
-                <ImageCard v-if="msg.images && msg.images.length" :images="msg.images" />
+                <ImageCard
+                  v-if="msg.images && msg.images.length"
+                  :images="msg.images"
+                  :user-id="currentUser?.id"
+                />
               </div>
-              <div v-else class="message-bubble">{{ msg.content }}</div>
+              <template v-else>
+                <div class="user-content-col">
+                  <FileGrid
+                    v-if="msg.attachments && msg.attachments.length"
+                    class="user-attachments"
+                    :files="toAttachmentDisplay(msg.attachments)"
+                    :closable="false"
+                  />
+                  <div v-if="msg.content" class="message-bubble">{{ msg.content }}</div>
+                </div>
+              </template>
             </div>
           </template>
           <div
@@ -742,6 +967,12 @@ watch(
         <!-- 输入区域 -->
         <div class="chat-input-area">
           <div class="chat-input-wrapper">
+            <!-- 待发送附件网格 -->
+            <FileGrid
+              v-if="pendingAttachments.length"
+              :files="pendingAttachments"
+              @remove="removeAttachment"
+            />
             <textarea
               ref="inputRef"
               v-model="inputText"
@@ -750,9 +981,35 @@ watch(
               rows="1"
               @keydown="handleKeyDown"
               @input="autoResizeInput"
+              @paste="onInputPaste"
             ></textarea>
+            <!-- 隐藏的文件选择器 -->
+            <input
+              ref="fileInputRef"
+              type="file"
+              class="upload-file-input"
+              :accept="uploadAccept"
+              multiple
+              @change="onFileInputChange"
+            />
             <div class="chat-operate">
               <div class="chat-operate-left">
+                <button
+                  v-if="supportsUpload"
+                  type="button"
+                  class="upload-btn"
+                  :title="uploadTooltip"
+                  @click="pickFile"
+                >
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                    <path
+                      d="M8 3v10M3 8h10"
+                      stroke="currentColor"
+                      stroke-width="1.6"
+                      stroke-linecap="round"
+                    />
+                  </svg>
+                </button>
                 <button
                   v-if="supportsThinking"
                   type="button"
@@ -1233,6 +1490,46 @@ html, body, #app {
 
 .thinking-icon {
   flex-shrink: 0;
+}
+
+/* 上传附件按钮：与 thinking-btn 视觉风格一致 */
+.upload-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--gf-border-strong);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--gf-text-regular);
+  cursor: pointer;
+  padding: 0;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.upload-btn:hover {
+  background: var(--gf-bg-elevated);
+  border-color: var(--gf-primary);
+  color: var(--gf-primary);
+}
+
+.upload-file-input {
+  display: none;
+}
+
+/* 历史用户消息：附件 + 气泡纵向堆叠，整体右对齐 */
+.message-item.user .user-content-col {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.message-item.user .user-attachments {
+  padding: 0;
+  max-width: 100%;
 }
 
 .chat-operate-right {
