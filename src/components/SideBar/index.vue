@@ -691,7 +691,6 @@ function handleSettings() {
   flex-shrink: 0;
   flex-grow: 0;
   position: relative;
-  border-top: 1px solid var(--gf-border);
   padding-top: 12px;
   margin-top: 12px;
 }
