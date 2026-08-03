@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, computed, nextTick, onMounted, watch } from 'vue'
+import { ref, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch, h, render, getCurrentInstance } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { marked } from 'marked'
@@ -27,6 +27,24 @@ import {
   type RemoteAttachment,
   type UploadConfig,
 } from './utils/uploadFile'
+import Tribute from './plugin/tribute'
+import ChatInput from './components/ChatInput/index.vue'
+import AutoTask from './components/AutoTask/autoTask.vue'
+import TimeCom from './components/TimeCom/index.vue'
+import SelectFile, { type SelectedFolder } from './components/AutoTask/selectFile.vue'
+import {
+  AUTO_TASK_TEMPLATE_MAP,
+  type InputTemplateNode,
+} from './components/AutoTask/inputTemplates'
+import { selectedAutoTaskKey, clearAutoTaskSelection } from './composables/useAutoTask'
+import { autoTaskMap } from './components/AutoTask/const'
+import { fetchMentionImages, type MentionFile } from './utils/mentionFiles'
+import {
+  menuItemTemplate,
+  noMatchTemplate,
+  loadingItemTemplate,
+  selectTemplate,
+} from './utils/tributeTemplates'
 import type { SSEController } from './utils/sse'
 
 const route = useRoute()
@@ -82,7 +100,9 @@ type AuthPage = 'login' | 'register'
 
 const inputText = ref('')
 const chatListRef = ref<HTMLElement | null>(null)
-const inputRef = ref<HTMLTextAreaElement | null>(null)
+const chatInputRef = ref<InstanceType<typeof ChatInput> | null>(null)
+/** ChatInput 内部的 contenteditable 元素：tribute 挂载点、模板插入与文本提取都作用于它 */
+const inputRef = ref<HTMLElement | null>(null)
 const activeChatId = ref('')
 const conversations = ref<ChatConversation[]>([])
 
@@ -160,22 +180,6 @@ async function onFileInputChange(e: Event) {
 }
 
 /** 粘贴触发的图片上传（仅支持图片的模型下有意义） */
-async function onInputPaste(e: ClipboardEvent) {
-  if (!supportsUpload.value) return
-  const items = e.clipboardData?.items
-  if (!items || !items.length) return
-  const pastedFiles: File[] = []
-  for (let i = 0; i < items.length; i += 1) {
-    const it = items[i]
-    if (it.kind !== 'file') continue
-    const f = it.getAsFile?.()
-    if (f) pastedFiles.push(f)
-  }
-  if (!pastedFiles.length) return
-  e.preventDefault()
-  await handleFilesSelected(pastedFiles)
-}
-
 /** 统一入口：校验 -> 压缩 -> 上传，全流程带 UI 反馈 */
 async function handleFilesSelected(rawFiles: File[]) {
   const cfg = uploadConfig.value
@@ -249,6 +253,7 @@ async function handleFilesSelected(rawFiles: File[]) {
 }
 
 function removeAttachment(uid: string) {
+  mentionTokens.delete(uid)
   const idx = pendingAttachments.value.findIndex((a) => a.uid === uid)
   if (idx < 0) return
   const target = pendingAttachments.value[idx]
@@ -270,6 +275,444 @@ function toAttachmentDisplay(list: RemoteAttachment[]): Attachment[] {
     url: a.url,
     status: 'success' as const,
   }))
+}
+
+/* ---------- 输入框 @ 唤起文件管理图片（tribute 插件） ---------- */
+
+/**
+ * @ 选进来的附件：uid -> 输入框里对应 chip 的 data-mention-url。
+ * 用户删掉 chip 时，据此把附件一起移除，避免"看不见却还会发出去"。
+ */
+const mentionTokens = new Map<string, string>()
+
+/** tribute 实例；只在支持图片的模型下挂载 */
+let tribute: Tribute<MentionFile> | null = null
+
+/** @ 是否可用：当前模型允许上传图片才有意义 */
+const mentionEnabled = computed(
+  () => !!uploadConfig.value && uploadConfig.value.fileType.includes('image/'),
+)
+
+/** values 回调防抖，避免每敲一个字都打一次接口 */
+let mentionTimer: ReturnType<typeof setTimeout> | null = null
+function loadMentionValues(keyword: string, cb: (list: MentionFile[]) => void) {
+  if (mentionTimer) clearTimeout(mentionTimer)
+  mentionTimer = setTimeout(() => {
+    const userId = currentUser.value?.id
+    if (!userId) return cb([])
+    fetchMentionImages(userId, keyword)
+      .then(cb)
+      .catch(() => cb([]))
+  }, 200)
+}
+
+/**
+ * @ 选中一张图片：文件已在 BOS 上，直接按"上传成功"的附件加入待发送列表，
+ * 无需再走一次上传。
+ */
+function handleMentionReplaced(e: Event) {
+  const detail = (e as CustomEvent).detail as { item?: { original?: MentionFile } }
+  const file = detail?.item?.original
+  if (!file) return
+  const cfg = uploadConfig.value
+  if (!cfg) return
+
+  if (!checkFileFormat({ name: file.name, type: file.type }, cfg.fileType)) {
+    ElMessage.error(`${file.name} 格式不被当前模型支持`)
+    return
+  }
+  if (pendingAttachments.value.some((a) => a.url === file.url)) {
+    return
+  }
+  if (pendingAttachments.value.length >= cfg.maxCount) {
+    ElMessage.error(`最多只能带 ${cfg.maxCount} 个附件`)
+    return
+  }
+
+  const uid = nextAttachmentUid()
+  pendingAttachments.value.push({
+    uid,
+    name: file.name,
+    type: file.type,
+    size: file.size,
+    thumbnail: file.url,
+    url: file.url,
+    status: 'success',
+  })
+  mentionTokens.set(uid, file.url)
+}
+
+/**
+ * 输入框内容变化后校对：对应的 @ chip 被删掉时同步移除附件。
+ * contenteditable 下 @ 回显是 `data-mention-url` 的 chip 节点，按节点而非文本比对。
+ */
+function syncMentionAttachments() {
+  const el = inputRef.value
+  const aliveUrls = new Set(
+    el
+      ? Array.from(el.querySelectorAll<HTMLElement>('[data-mention-url]')).map(
+          (n) => n.dataset.mentionUrl as string,
+        )
+      : [],
+  )
+  for (const [uid, url] of [...mentionTokens.entries()]) {
+    // 附件已被别处移除（如切模型时过滤），只清理记录
+    if (!pendingAttachments.value.some((a) => a.uid === uid)) {
+      mentionTokens.delete(uid)
+      continue
+    }
+    if (!aliveUrls.has(url)) {
+      removeAttachment(uid)
+    }
+  }
+}
+
+/**
+ * tribute 以 capture 方式接管了 Enter，并派发 shift-enter / ctrl-enter，
+ * 默认换行因此失效。ChatInput 那两个事件已通过 exclude-events 排除（否则会当成发送），
+ * 这里用 execCommand 在 contenteditable 光标处插入换行，并存一次撤销快照。
+ */
+function insertNewlineAtCaret() {
+  const el = inputRef.value
+  if (!el) return
+  el.focus()
+  chatInputRef.value?.saveSnapshot?.()
+  document.execCommand('insertLineBreak')
+}
+
+function initTribute(el: HTMLElement) {
+  tribute = new Tribute<MentionFile>({
+    trigger: '@',
+    iframe: false,
+    fixedPosition: 'top',
+    autocompleteMode: false,
+    requireLeadingSpace: false,
+    allowSpaces: false,
+    spaceSelectsMatch: false,
+    menuShowMinLength: 0,
+    menuItemLimit: 50,
+    selectClass: 'is-selected',
+    containerClass: 'chat-mention__list',
+    itemClass: '',
+    menuContainer: document.body,
+    loadingItemTemplate: loadingItemTemplate(),
+    // 服务端已按 keyword 过滤，跳过前端模糊匹配，保持后端返回顺序
+    searchOpts: { pre: '', post: '', skip: true },
+    lookup: 'name',
+    fillAttr: 'name',
+    values: loadMentionValues,
+    menuItemTemplate,
+    noMatchTemplate,
+    selectTemplate,
+  })
+  tribute.attach(el)
+  el.addEventListener('tribute-replaced', handleMentionReplaced)
+  el.addEventListener('shift-enter', insertNewlineAtCaret)
+  el.addEventListener('ctrl-enter', insertNewlineAtCaret)
+}
+
+function destroyTribute(el: HTMLElement) {
+  el.removeEventListener('tribute-replaced', handleMentionReplaced)
+  el.removeEventListener('shift-enter', insertNewlineAtCaret)
+  el.removeEventListener('ctrl-enter', insertNewlineAtCaret)
+  tribute?.detach(el)
+  tribute = null
+}
+
+/**
+ * 输入框元素会随登录态/路由切换被销毁重建，模型切换又决定 @ 是否可用，
+ * 所以统一用 watch 在这两个条件变化时重新挂载。
+ */
+watch(
+  [inputRef, mentionEnabled],
+  ([el], [prevEl]) => {
+    if (prevEl && (prevEl !== el || !mentionEnabled.value)) {
+      destroyTribute(prevEl)
+    }
+    if (el && mentionEnabled.value && !tribute) {
+      initTribute(el)
+    }
+  },
+  { flush: 'post' },
+)
+
+onBeforeUnmount(() => {
+  if (inputRef.value) destroyTribute(inputRef.value)
+})
+
+/* ---------- 自动化任务：模板插入（抄自 enterprise-genclaw 的 customInput） ---------- */
+
+const appContext = getCurrentInstance()?.appContext ?? null
+
+/** TimeCom 的值格式化成提交用的文本 */
+function formatTimeComValue(val: {
+  freq: string
+  days?: (string | number)[]
+  time: string
+}): string {
+  const freqLabel: Record<string, string> = {
+    once: '',
+    daily: '每天',
+    workday: '工作日',
+    weekly: '每周',
+    monthly: '每月',
+    interval: '每隔',
+  }
+  const label = freqLabel[val.freq] ?? ''
+  if (val.freq === 'weekly' || val.freq === 'monthly') {
+    const days = (val.days ?? []).join('、')
+    return `${label}${days ? days + ' ' : ''}${val.time}`
+  }
+  return val.time ? `${label}${val.time}` : label
+}
+
+/**
+ * 行内 Vue 组件的挂载器。undo / 粘贴还原 innerHTML 后，ChatInput 会按
+ * data-vc-type 重新调用这里的 mounter，data-vc-state 保存着上次的组件状态。
+ */
+const vcMounterMap: Record<string, (el: HTMLElement) => void> = {
+  TimeCom: (el) => {
+    let initVal: { freq?: string; days?: (string | number)[]; time?: string } | undefined
+    if (el.dataset.vcState) {
+      try {
+        initVal = JSON.parse(el.dataset.vcState)
+      } catch {
+        initVal = undefined
+      }
+    }
+    const vnode = h(TimeCom, {
+      init: initVal,
+      disablePast: true,
+      onChange: (val: { freq: string; days?: (string | number)[]; time: string }) => {
+        el.dataset.textVal = formatTimeComValue(val)
+        // 每次变化都同步序列化到 DOM，保证 copy / undo 时状态可还原
+        el.dataset.vcState = JSON.stringify(val)
+      },
+    })
+    if (appContext) vnode.appContext = appContext
+    render(vnode, el)
+  },
+  SelectFile: (el) => {
+    let initFiles: SelectedFolder[] | undefined
+    if (el.dataset.vcState) {
+      try {
+        initFiles = JSON.parse(el.dataset.vcState)
+      } catch {
+        initFiles = undefined
+      }
+    }
+    const vnode = h(SelectFile, {
+      init: initFiles,
+      userId: String(currentUser.value?.id ?? ''),
+      onChange: (files: SelectedFolder[]) => {
+        el.dataset.textVal = files.length
+          ? `文件管理目录：${files.map((f) => f.path || '/').join(',')}`
+          : ''
+        el.dataset.vcState = JSON.stringify(files)
+        // 选完把光标移到组件之后，方便接着输入
+        const host = inputRef.value
+        if (host && host.contains(el) && el.parentNode) {
+          host.focus()
+          const range = document.createRange()
+          const idx = Array.from(el.parentNode.childNodes).indexOf(el)
+          range.setStart(el.parentNode, idx + 1)
+          range.collapse(true)
+          const sel = window.getSelection()
+          sel?.removeAllRanges()
+          sel?.addRange(range)
+        }
+      },
+    })
+    if (appContext) vnode.appContext = appContext
+    render(vnode, el)
+  },
+}
+
+/**
+ * 把模板插入输入框：
+ * - text : 直接 insertText
+ * - com  : 创建锚点 span，挂载对应 Vue 组件
+ * - el   : 创建不可编辑的行内 DOM 元素，携带 data-el-val
+ *
+ * 整段插入期间 pauseSnapshot，只在开头存一次快照，保证 Cmd+Z 一次撤回整个模板。
+ */
+function insertFromTemplate(template: InputTemplateNode[]) {
+  void nextTick(() => {
+    const input = chatInputRef.value
+    if (!input) return
+    input.pauseSnapshot?.()
+    input.clear?.()
+    input.saveSnapshot?.()
+
+    for (const node of template) {
+      if (node.type === 'text') {
+        input.insertText?.(node.text)
+      } else if (node.type === 'com') {
+        const mounter = vcMounterMap[node.name]
+        if (!mounter) continue
+        const container = document.createElement('span')
+        container.setAttribute('contenteditable', 'false')
+        container.setAttribute('data-vc-type', node.name)
+        if (node.init) container.dataset.vcState = JSON.stringify(node.init)
+        mounter(container)
+        input.insertElement?.(container)
+      } else {
+        const tag = node.el ?? 'span'
+        const el = document.createElement(tag)
+        el.setAttribute('contenteditable', 'false')
+        el.setAttribute('data-el-val', node.val)
+        if (node.class) el.className = node.class
+        el.textContent = node.text
+        input.insertElement?.(el)
+      }
+    }
+
+    input.resumeSnapshot?.()
+  })
+}
+
+// 注册 vc 渲染器：undo / 粘贴恢复 innerHTML 后由 ChatInput 自动重新挂载组件
+watch(
+  chatInputRef,
+  (input) => {
+    inputRef.value = (input?.inputEl as HTMLElement | undefined) ?? null
+    if (!input) return
+    for (const [name, mounter] of Object.entries(vcMounterMap)) {
+      input.registerVcRenderer?.(name, mounter)
+    }
+  },
+  { flush: 'post' },
+)
+
+// 选中自动化任务 -> 插入对应模板（取消选中时不清空输入框，与 genclaw 一致）
+watch(selectedAutoTaskKey, (key) => {
+  if (!key) return
+  const tpl = AUTO_TASK_TEMPLATE_MAP[key]
+  if (tpl) insertFromTemplate(tpl)
+})
+
+/**
+ * 提交时从 contenteditable 提取完整文本：
+ * - 普通文本节点原样取
+ * - contenteditable=false 的节点优先取 data-text-val（TimeCom / SelectFile / @ chip），
+ *   否则取 data-el-val（「有新增文件」这类 chip）
+ * - BR / DIV / P 还原换行
+ */
+function buildFullMessage(): string {
+  const host = inputRef.value
+  if (!host) return inputText.value
+
+  const extract = (node: Node): string => {
+    if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? ''
+    if (node.nodeType !== Node.ELEMENT_NODE) return ''
+    const el = node as HTMLElement
+    if (el.getAttribute('contenteditable') === 'false') {
+      if (el.dataset.textVal !== undefined) return el.dataset.textVal
+      if (el.dataset.elVal !== undefined) return el.dataset.elVal
+      return ''
+    }
+    if (el.tagName === 'BR') return '\n'
+    if (el.tagName === 'DIV' || el.tagName === 'P') {
+      const inner = Array.from(el.childNodes).map(extract).join('')
+      return inner.replace(/\n$/, '') + '\n'
+    }
+    return Array.from(el.childNodes).map(extract).join('')
+  }
+
+  return Array.from(host.childNodes).map(extract).join('')
+}
+
+/**
+ * 粘贴处理（抄自 enterprise-genclaw 的 handlePaste）：
+ * - 含 data-vc-type：交给 ChatInput，由它负责重新挂载 Vue 组件
+ * - 含 data-el-val / data-text-val：用 insertHTML 保留 span 结构
+ * - 纯文本：insertHTML 且 \n 转 <br>，粘贴前存快照，Cmd+Z 可精确回到粘贴前
+ */
+function handlePaste(e: ClipboardEvent) {
+  // 剪贴板里有图片文件：走上传逻辑（保持原 textarea 时代的粘贴上传能力）
+  const items = e.clipboardData?.items
+  if (supportsUpload.value && items && items.length) {
+    const pastedFiles: File[] = []
+    for (let i = 0; i < items.length; i += 1) {
+      if (items[i].kind !== 'file') continue
+      const f = items[i].getAsFile?.()
+      if (f) pastedFiles.push(f)
+    }
+    if (pastedFiles.length) {
+      e.preventDefault()
+      e.stopImmediatePropagation()
+      void handleFilesSelected(pastedFiles)
+      return
+    }
+  }
+
+  const html = e.clipboardData?.getData('text/html') || ''
+  const plain = e.clipboardData?.getData('text/plain') || ''
+
+  if (html && new DOMParser().parseFromString(html, 'text/html').querySelector('[data-vc-type]')) {
+    // vc 组件粘贴交给 ChatInput 接管
+    return
+  }
+
+  e.preventDefault()
+  e.stopImmediatePropagation()
+
+  type Segment =
+    | { type: 'text'; text: string }
+    | { type: 'span'; label: string; attrs: Record<string, string>; cls?: string }
+  const segments: Segment[] = []
+
+  if (html) {
+    const doc = new DOMParser().parseFromString(html, 'text/html')
+    const hasChip = doc.querySelector('[data-el-val],[data-text-val]')
+    if (!hasChip && plain) {
+      segments.push({ type: 'text', text: plain })
+    } else {
+      const walk = (node: Node) => {
+        if (node.nodeType === Node.TEXT_NODE) {
+          const text = node.textContent || ''
+          if (text) segments.push({ type: 'text', text })
+        } else if (node.nodeType === Node.ELEMENT_NODE) {
+          const el = node as HTMLElement
+          if (el.tagName === 'SPAN' && (el.dataset.elVal !== undefined || el.dataset.textVal !== undefined)) {
+            const attrs: Record<string, string> = {}
+            if (el.dataset.elVal !== undefined) attrs['data-el-val'] = el.dataset.elVal
+            if (el.dataset.textVal !== undefined) attrs['data-text-val'] = el.dataset.textVal
+            if (el.dataset.mentionUrl !== undefined) attrs['data-mention-url'] = el.dataset.mentionUrl
+            segments.push({ type: 'span', label: el.textContent || '', attrs, cls: el.className || undefined })
+          } else if (el.tagName === 'BR') {
+            segments.push({ type: 'text', text: '\n' })
+          } else {
+            el.childNodes.forEach(walk)
+          }
+        }
+      }
+      doc.body.childNodes.forEach(walk)
+    }
+  } else if (plain) {
+    segments.push({ type: 'text', text: plain })
+  }
+
+  if (!segments.length) return
+
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  const escAttr = (s: string) => esc(s).replace(/"/g, '&quot;')
+
+  // 粘贴前保存快照：把"粘贴前状态"写入 undo 栈
+  chatInputRef.value?.saveSnapshot?.()
+
+  const htmlStr = segments
+    .map((s) => {
+      if (s.type === 'text') return esc(s.text).replace(/\n/g, '<br>')
+      const attrStr = Object.entries(s.attrs)
+        .map(([k, v]) => `${k}="${escAttr(v)}"`)
+        .join(' ')
+      return `<span contenteditable="false" class="${escAttr(s.cls || 'wp-chat-input-temp-span')}" ${attrStr}>${esc(s.label)}</span>`
+    })
+    .join('')
+  document.execCommand('insertHTML', false, htmlStr)
+
+  void nextTick(handleInputChange)
 }
 
 /**
@@ -430,24 +873,16 @@ function handleChatScroll() {
 }
 
 /**
- * 输入框根据内容自动增高，避免换行后内容被裁掉。
+ * 输入内容变化：ChatInput 自己管高度，这里只负责校对 @ 附件。
  */
-function autoResizeInput() {
-  const el = inputRef.value
-  if (!el) return
-  el.style.height = 'auto'
-  const next = Math.min(el.scrollHeight, 200)
-  el.style.height = next + 'px'
+function handleInputChange() {
+  // @ 进来的附件若对应 chip 被删掉，同步移除附件
+  syncMentionAttachments()
 }
 
-// 切换会话或用户手动输入时都要重排高度
-watch(inputText, () => {
-  nextTick(autoResizeInput)
-})
 watch(activeChatId, () => {
   stickToBottom.value = true
   nextTick(() => {
-    autoResizeInput()
     scrollToBottom(true)
   })
 })
@@ -588,8 +1023,12 @@ async function loadMessages(conversationId: string) {
 }
 
 function handleSubmit() {
-  const text = inputText.value.trim()
-  if (!text) return
+  // 输入框是 contenteditable：文本要从 DOM 提取，行内组件取 data-text-val
+  const body = buildFullMessage().trim()
+  if (!body) return
+  // 选了自动化任务时，按 genclaw 的做法给 query 加任务前缀
+  const taskTitle = autoTaskMap.find((t) => t.key === selectedAutoTaskKey.value)?.title
+  const text = taskTitle ? `任务：${taskTitle}; ${body}` : body
 
   // 附件有上传中的项：先拦住，避免消息发出后 URL 还没回填
   if (pendingAttachments.value.some((a) => a.status === 'uploading')) {
@@ -620,11 +1059,15 @@ function handleSubmit() {
     attachments: succAttachments.length ? succAttachments : undefined,
   })
   inputText.value = ''
+  // contenteditable 需要显式清空 DOM（顺带重置 isEmpty / 多行状态）
+  chatInputRef.value?.clear?.()
+  clearAutoTaskSelection()
   // 清空输入区附件（本地缩略图释放 blob URL）
   for (const a of pendingAttachments.value) {
     if (a.thumbnail && a.thumbnail.startsWith('blob:')) URL.revokeObjectURL(a.thumbnail)
   }
   pendingAttachments.value = []
+  mentionTokens.clear()
   state.messages.push({ role: 'assistant', content: '' })
   state.assistantIndex = state.messages.length - 1
   state.loading = true
@@ -779,19 +1222,14 @@ function handleStop() {
   abortSessionStream(key)
 }
 
-function handleKeyDown(e: KeyboardEvent) {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault()
-    handleSubmit()
-  }
-}
-
 /**
  * "新建对话"：切换到空白新对话状态并回到首页路由（URL 不带会话 id）。
  */
 function handleNewChat() {
   activeChatId.value = ''
   inputText.value = ''
+  chatInputRef.value?.clear?.()
+  clearAutoTaskSelection()
   if (route.name !== 'home') router.push('/')
 }
 
@@ -808,6 +1246,8 @@ function handleOpenFileManager() {
 async function openConversation(id: string) {
   activeChatId.value = id
   inputText.value = ''
+  chatInputRef.value?.clear?.()
+  clearAutoTaskSelection()
   if (!sessionStates[id]) {
     await loadMessages(id)
   } else {
@@ -862,6 +1302,8 @@ watch(
       if (activeChatId.value !== '') {
         activeChatId.value = ''
         inputText.value = ''
+        chatInputRef.value?.clear?.()
+        clearAutoTaskSelection()
       }
     }
   },
@@ -973,16 +1415,18 @@ watch(
               :files="pendingAttachments"
               @remove="removeAttachment"
             />
-            <textarea
-              ref="inputRef"
+            <ChatInput
+              ref="chatInputRef"
               v-model="inputText"
+              bare
               class="chat-input"
-              placeholder="描述您的问题"
-              rows="1"
-              @keydown="handleKeyDown"
-              @input="autoResizeInput"
-              @paste="onInputPaste"
-            ></textarea>
+              :placeholder="mentionEnabled ? '描述您的问题，或输入 @ 选择图片' : '描述您的问题'"
+              :exclude-events="['shift-enter', 'ctrl-enter']"
+              inline-element-vertical-align="middle"
+              @submit="handleSubmit"
+              @input="handleInputChange"
+              @paste="handlePaste"
+            />
             <!-- 隐藏的文件选择器 -->
             <input
               ref="fileInputRef"
@@ -994,6 +1438,7 @@ watch(
             />
             <div class="chat-operate">
               <div class="chat-operate-left">
+                <AutoTask />
                 <button
                   v-if="supportsUpload"
                   type="button"
@@ -1106,6 +1551,88 @@ html, body, #app {
   background: var(--gf-bg-page);
   color: var(--gf-text-primary);
   transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* ---- 输入框 @ 候选菜单：tribute 把菜单挂到 body 上，样式必须是全局的 ---- */
+.chat-mention__list {
+  display: none;
+  flex-direction: column;
+  box-sizing: border-box;
+  min-width: 280px;
+  z-index: 3000;
+  background: var(--gf-bg-panel);
+  border: 1px solid var(--gf-border-strong);
+  border-radius: 10px;
+  box-shadow: var(--gf-shadow-menu);
+  overflow: hidden;
+}
+
+.chat-mention__list > div {
+  width: 100%;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.chat-mention__list ul {
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+}
+
+.chat-mention__list li {
+  padding: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.chat-mention__list li.is-selected {
+  background: var(--gf-bg-elevated-hover);
+}
+
+.chat-mention__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+}
+
+.chat-mention__thumb {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 4px;
+  object-fit: cover;
+  background: var(--gf-bg-elevated);
+}
+
+.chat-mention__detail {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.chat-mention__name {
+  font-size: 13px;
+  color: var(--gf-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-mention__meta {
+  font-size: 12px;
+  color: var(--gf-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-mention__empty,
+.chat-mention__loading {
+  padding: 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--gf-text-tertiary);
 }
 </style>
 
