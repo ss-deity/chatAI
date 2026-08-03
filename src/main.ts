@@ -1,5 +1,6 @@
 import { createApp } from 'vue'
 import { createRouter, createWebHashHistory } from 'vue-router'
+import { DatePicker, TimePicker, InputNumber } from 'ant-design-vue'
 import App from './index.vue'
 import './assets/theme.css'
 import 'element-plus/es/components/message/style/css'
@@ -19,4 +20,11 @@ const router = createRouter({
   ],
 })
 
-createApp(App).use(router).mount('#app')
+// 自动化任务模板里的时间选择器沿用 enterprise-genclaw 的实现，依赖 ant-design-vue 的
+// a-date-picker / a-time-picker / a-input-number，这里按需全局注册（其余组件仍用 element-plus）
+createApp(App)
+  .use(DatePicker)
+  .use(TimePicker)
+  .use(InputNumber)
+  .use(router)
+  .mount('#app')

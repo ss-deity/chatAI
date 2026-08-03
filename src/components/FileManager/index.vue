@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useVirtualList } from '../../composables/useVirtualList'
 import ImagePreview from '../ImagePreview/index.vue'
@@ -270,11 +270,29 @@ const showRename = ref(false)
 const renameTarget = ref<FileEntry | null>(null)
 const renameValue = ref('')
 const renameLoading = ref(false)
+const renameInputRef = ref<HTMLInputElement | null>(null)
+
+/**
+ * 主文件名的长度（不含扩展名），用于打开弹窗时只选中这一段。
+ * 文件夹、无扩展名、以及 `.gitignore` 这类以点开头的隐藏文件都返回整个名称长度。
+ */
+function stemLength(name: string, isDir: boolean): number {
+  if (isDir) return name.length
+  const dot = name.lastIndexOf('.')
+  return dot > 0 ? dot : name.length
+}
 
 function openRename(entry: FileEntry) {
   renameTarget.value = entry
   renameValue.value = entry.name
   showRename.value = true
+  // 弹窗渲染完成后聚焦，并只选中扩展名之前的部分，方便直接改名
+  void nextTick(() => {
+    const el = renameInputRef.value
+    if (!el) return
+    el.focus()
+    el.setSelectionRange(0, stemLength(entry.name, entry.isDir))
+  })
 }
 
 async function confirmRename() {
@@ -567,6 +585,7 @@ onBeforeUnmount(cancelCloseTimer)
             </div>
             <div class="gf-dialog-body">
               <input
+                ref="renameInputRef"
                 v-model="renameValue"
                 class="fm-input"
                 placeholder="请输入新名称"
