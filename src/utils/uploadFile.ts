@@ -56,10 +56,16 @@ export interface UploadConfig {
 
 const getMB = (n: number) => n * 1024 * 1024
 
+/** Excel（xlsx）MIME，部分环境下 file.type 会给成 octet-stream，靠扩展名兜底 */
+const XLSX_MIME =
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+
 /** 单个文件按 MIME 的大小上限（byte） */
 const FILE_SIZE_LIMITS: Record<string, number> = {
   'application/pdf': getMB(50),
   'text/plain': getMB(50),
+  'text/csv': getMB(50),
+  [XLSX_MIME]: getMB(20),
   'image/png': getMB(30),
   'image/jpeg': getMB(30),
   'image/webp': getMB(30),
@@ -72,6 +78,8 @@ const MIME_TO_EXTENSIONS: Record<string, string[]> = {
   'image/webp': ['webp'],
   'application/pdf': ['pdf'],
   'text/plain': ['txt'],
+  'text/csv': ['csv'],
+  [XLSX_MIME]: ['xlsx'],
 }
 
 /** 按 chatAI 的 model type 组织的上传规则表 */
@@ -80,8 +88,9 @@ export const MODEL_UPLOAD_CONFIG: Record<string, UploadConfig> = {
     maxCount: 3,
     maxImgCompressLimit: 7,
     targetCompressMB: 3,
-    fileType: 'image/png,image/jpeg,image/webp,application/pdf,text/plain',
-    hitWord: '上传附件，最多3个，文档支持 pdf、txt，图片支持 png、jpeg、webp，文档最大 50MB，图片最大 30MB',
+    fileType: `image/png,image/jpeg,image/webp,application/pdf,text/plain,text/csv,${XLSX_MIME}`,
+    hitWord:
+      '上传附件，最多3个，文档支持 pdf、txt、csv、xlsx，图片支持 png、jpeg、webp，文档最大 50MB（xlsx 20MB），图片最大 30MB',
   },
   'jimeng-v4.6': {
     maxCount: 5,
@@ -118,12 +127,21 @@ export function checkFileFormat(
 
 /** 单文件大小校验（不满足会 toast） */
 export function checkFileSize(file: File): boolean {
-  const limit = FILE_SIZE_LIMITS[file.type]
+  const limit = FILE_SIZE_LIMITS[file.type] ?? sizeLimitByExt(file.name)
   if (limit && file.size > limit) {
     ElMessage.error(`${file.name} 超过大小限制（${limit / 1024 / 1024}MB）`)
     return false
   }
   return true
+}
+
+/** file.type 缺失/错标时，按扩展名反查大小上限 */
+function sizeLimitByExt(name: string): number | undefined {
+  const ext = getFileExtension(name)
+  const mime = Object.keys(MIME_TO_EXTENSIONS).find((m) =>
+    MIME_TO_EXTENSIONS[m].includes(ext),
+  )
+  return mime ? FILE_SIZE_LIMITS[mime] : undefined
 }
 
 /**
