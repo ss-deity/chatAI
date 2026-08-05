@@ -39,6 +39,8 @@ import {
 import { selectedAutoTaskKey, clearAutoTaskSelection } from './composables/useAutoTask'
 import { autoTaskMap } from './components/AutoTask/const'
 import { fetchMentionImages, type MentionFile } from './utils/mentionFiles'
+import SkillPanel from './components/SkillPanel/index.vue'
+import { fetchSkills, type Skill } from './utils/skills'
 import {
   menuItemTemplate,
   noMatchTemplate,
@@ -285,12 +287,15 @@ function toAttachmentDisplay(list: RemoteAttachment[]): Attachment[] {
  */
 const mentionTokens = new Map<string, string>()
 
-/** tribute 实例；只在支持图片的模型下挂载 */
+/** tribute 实例；只在图片生成模型（即梦）下挂载 */
 let tribute: Tribute<MentionFile> | null = null
 
-/** @ 是否可用：当前模型允许上传图片才有意义 */
+/**
+ * @ 是否可用：只有图片生成模型（capability=image，即即梦）才需要 @ 选图，
+ * 其它模型下不挂载 tribute，@ 就是普通字符。
+ */
 const mentionEnabled = computed(
-  () => !!uploadConfig.value && uploadConfig.value.fileType.includes('image/'),
+  () => getModel(selectedModel.value).capability === 'image' && !!uploadConfig.value,
 )
 
 /** values 回调防抖，避免每敲一个字都打一次接口 */
@@ -439,6 +444,162 @@ watch(
 onBeforeUnmount(() => {
   if (inputRef.value) destroyTribute(inputRef.value)
 })
+
+/* ---------- 输入框 / 唤起技能（交互参考 enterprise-genclaw 的 customInput） ---------- */
+
+/** 全量技能列表，来自后端 GET /api/skills（对应 ai-gateway/src/skills/skills.json） */
+const skills = ref<Skill[]>([])
+const showSkillPanel = ref(false)
+/** `/` 之后已输入的关键字 */
+const skillKeyword = ref('')
+const skillPanelRef = ref<InstanceType<typeof SkillPanel> | null>(null)
+
+function loadSkills() {
+  fetchSkills()
+    .then((list) => {
+      skills.value = list
+    })
+    .catch((err) => {
+      console.error('获取技能列表失败', err)
+    })
+}
+
+function closeSkillPanel() {
+  showSkillPanel.value = false
+  skillKeyword.value = ''
+}
+
+/**
+ * 按光标位置决定面板显隐与关键字：
+ * 光标所在文本节点里，最后一个 `/` 到光标之间不含空白时视为正在唤起技能。
+ */
+function syncSkillPanelWithCursor() {
+  const host = inputRef.value
+  if (!host || !skills.value.length) return closeSkillPanel()
+
+  const sel = window.getSelection()
+  if (!sel || sel.rangeCount === 0) return closeSkillPanel()
+  const anchor = sel.anchorNode
+  if (!anchor || anchor.nodeType !== Node.TEXT_NODE || !host.contains(anchor)) {
+    return closeSkillPanel()
+  }
+
+  const before = (anchor as Text).data.slice(0, sel.getRangeAt(0).startOffset)
+  const slashIdx = before.lastIndexOf('/')
+  if (slashIdx < 0) return closeSkillPanel()
+  // `/` 必须位于行首或空白之后，避免 `a/b`、`http://` 这类内容误唤起
+  if (slashIdx > 0 && !/[\s\u00A0]/.test(before[slashIdx - 1])) {
+    return closeSkillPanel()
+  }
+  const afterSlash = before.slice(slashIdx + 1)
+  if (/[\s\u00A0]/.test(afterSlash)) return closeSkillPanel()
+
+  skillKeyword.value = afterSlash
+  showSkillPanel.value = true
+}
+
+/**
+ * 面板打开时接管方向键 / Enter / Esc。
+ * 绑在输入区外层的 capture 阶段，早于 ChatInput 与 tribute 在元素上的监听，
+ * 因此 Enter 只用于选中技能，不会触发发送。
+ */
+function handleInputAreaKeyDown(e: KeyboardEvent) {
+  if (!showSkillPanel.value) return
+  if (e.key === 'ArrowDown') {
+    e.preventDefault()
+    e.stopPropagation()
+    skillPanelRef.value?.moveDown()
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault()
+    e.stopPropagation()
+    skillPanelRef.value?.moveUp()
+  } else if (e.key === 'Enter') {
+    e.preventDefault()
+    e.stopPropagation()
+    skillPanelRef.value?.confirm()
+  } else if (e.key === 'Escape') {
+    e.preventDefault()
+    e.stopPropagation()
+    closeSkillPanel()
+  }
+}
+
+/**
+ * 选中技能：把光标前的 `/keyword` 替换成不可编辑 chip。
+ * - `data-skill-id`：提交时据此收集本次生效的技能
+ * - `data-text-val`：buildFullMessage 提取文本时取它，模型侧看到的是 `/command`
+ */
+function handleSkillSelect(skill: Skill) {
+  closeSkillPanel()
+  const host = inputRef.value
+  if (!host) return
+  host.focus()
+
+  // 找到最后一个包含 `/` 的普通文本节点（跳过已有 chip 内部的文本）
+  const walker = document.createTreeWalker(host, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const parent = (node as Text).parentElement
+      return parent?.getAttribute('contenteditable') === 'false'
+        ? NodeFilter.FILTER_REJECT
+        : NodeFilter.FILTER_ACCEPT
+    },
+  })
+  let triggerNode: Text | null = null
+  let triggerOffset = -1
+  let node: Node | null
+  while ((node = walker.nextNode())) {
+    const idx = (node as Text).data.lastIndexOf('/')
+    if (idx >= 0) {
+      triggerNode = node as Text
+      triggerOffset = idx
+    }
+  }
+  if (!triggerNode || triggerOffset < 0) return
+
+  // `/keyword` 的结束位置：遇到空白或行尾为止
+  const after = triggerNode.data.slice(triggerOffset + 1)
+  const spaceIdx = after.search(/[\s\u00A0]/)
+  const endOffset = spaceIdx >= 0 ? triggerOffset + 1 + spaceIdx : triggerNode.data.length
+
+  // 插入前存快照，Cmd+Z 可回到 `/keyword` 状态
+  chatInputRef.value?.saveSnapshot?.()
+
+  const range = document.createRange()
+  range.setStart(triggerNode, triggerOffset)
+  range.setEnd(triggerNode, endOffset)
+  range.deleteContents()
+
+  const chip = document.createElement('span')
+  chip.setAttribute('contenteditable', 'false')
+  chip.setAttribute('data-skill-id', skill.id)
+  chip.setAttribute('data-text-val', `/${skill.command}`)
+  chip.className = 'chat-skill__chip'
+  chip.textContent = skill.name
+  range.insertNode(chip)
+
+  // chip 后补一个不间断空格并把光标移到其后，避免继续输入被吸进 chip
+  const space = document.createTextNode('\u00A0')
+  chip.after(space)
+  const caret = document.createRange()
+  caret.setStartAfter(space)
+  caret.collapse(true)
+  const sel = window.getSelection()
+  sel?.removeAllRanges()
+  sel?.addRange(caret)
+
+  // 通知 ChatInput 同步 modelValue / 空状态 / 多行高度
+  host.dispatchEvent(new Event('input', { bubbles: true }))
+}
+
+/** 当前输入框里生效的技能 id（按 chip 出现顺序，去重） */
+function collectSkillIds(): string[] {
+  const host = inputRef.value
+  if (!host) return []
+  const ids = Array.from(host.querySelectorAll<HTMLElement>('[data-skill-id]'))
+    .map((el) => el.dataset.skillId as string)
+    .filter(Boolean)
+  return [...new Set(ids)]
+}
 
 /* ---------- 自动化任务：模板插入（抄自 enterprise-genclaw 的 customInput） ---------- */
 
@@ -781,6 +942,8 @@ onMounted(() => {
   if (savedTheme) {
     document.documentElement.setAttribute('data-theme', savedTheme)
   }
+  // 技能列表（输入框 / 唤起用），失败不阻塞对话
+  loadSkills()
 })
 
 /**
@@ -873,11 +1036,13 @@ function handleChatScroll() {
 }
 
 /**
- * 输入内容变化：ChatInput 自己管高度，这里只负责校对 @ 附件。
+ * 输入内容变化：ChatInput 自己管高度，这里负责校对 @ 附件与 / 技能面板。
  */
 function handleInputChange() {
   // @ 进来的附件若对应 chip 被删掉，同步移除附件
   syncMentionAttachments()
+  // 按光标位置决定 / 技能面板的显隐与关键字
+  syncSkillPanelWithCursor()
 }
 
 watch(activeChatId, () => {
@@ -1026,6 +1191,9 @@ function handleSubmit() {
   // 输入框是 contenteditable：文本要从 DOM 提取，行内组件取 data-text-val
   const body = buildFullMessage().trim()
   if (!body) return
+  // / 唤起的技能 id：必须在清空输入框前收集
+  const skillIds = collectSkillIds()
+  closeSkillPanel()
   // 选了自动化任务时，按 genclaw 的做法给 query 加任务前缀
   const taskTitle = autoTaskMap.find((t) => t.key === selectedAutoTaskKey.value)?.title
   const text = taskTitle ? `任务：${taskTitle}; ${body}` : body
@@ -1093,6 +1261,10 @@ function handleSubmit() {
   // 附件（远端 URL）随请求发送，后端保存到用户 Message 并可传给模型
   if (succAttachments.length) {
     requestBody.attachments = succAttachments
+  }
+  // / 唤起的技能：后端据此拼 system prompt 下发给模型
+  if (skillIds.length) {
+    requestBody.skills = skillIds
   }
 
   // 用闭包变量跟踪当前会话 key，收到真实 conversationId 时会重命名
@@ -1408,7 +1580,17 @@ watch(
 
         <!-- 输入区域 -->
         <div class="chat-input-area">
-          <div class="chat-input-wrapper">
+          <div class="chat-input-wrapper" @keydown.capture="handleInputAreaKeyDown">
+            <!-- / 唤起的技能候选面板：浮在输入框上方 -->
+            <SkillPanel
+              v-if="showSkillPanel"
+              ref="skillPanelRef"
+              class="skill-panel-float"
+              :keyword="skillKeyword"
+              :skills="skills"
+              @select="handleSkillSelect"
+              @empty="closeSkillPanel"
+            />
             <!-- 待发送附件网格 -->
             <FileGrid
               v-if="pendingAttachments.length"
@@ -1420,12 +1602,13 @@ watch(
               v-model="inputText"
               bare
               class="chat-input"
-              :placeholder="mentionEnabled ? '描述您的问题，或输入 @ 选择图片' : '描述您的问题'"
+              :placeholder="mentionEnabled ? '描述您的问题，输入 / 选择技能，@ 选择图片' : '描述您的问题，输入 / 选择技能'"
               :exclude-events="['shift-enter', 'ctrl-enter']"
               inline-element-vertical-align="middle"
               @submit="handleSubmit"
               @input="handleInputChange"
               @paste="handlePaste"
+              @blur="closeSkillPanel"
             />
             <!-- 隐藏的文件选择器 -->
             <input
@@ -1634,6 +1817,19 @@ html, body, #app {
   font-size: 13px;
   color: var(--gf-text-tertiary);
 }
+
+/* ---- 输入框里的技能 chip：/ 选中技能后回填的不可编辑标签 ---- */
+.chat-skill__chip {
+  display: inline-block;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--gf-primary-bg);
+  color: var(--gf-primary);
+  font-size: 13px;
+  line-height: 20px;
+  user-select: none;
+  cursor: default;
+}
 </style>
 
 <style scoped>
@@ -1652,7 +1848,7 @@ html, body, #app {
   flex-direction: column;
   justify-content: center;
   align-items: center;
-  min-width: 480px;
+  min-width: 560px;
   background: var(--gf-bg-page);
 }
 
@@ -1940,11 +2136,21 @@ html, body, #app {
 }
 
 .chat-input-wrapper {
+  position: relative;
   border: 1px solid var(--gf-border-strong);
   border-radius: 12px;
   padding: 12px 16px;
   background: var(--gf-bg-panel);
   transition: border-color 0.2s, background-color 0.2s;
+}
+
+/* / 技能面板：浮在输入框上方，宽度跟随输入框 */
+.skill-panel-float {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  width: 100%;
+  z-index: 3000;
 }
 
 .chat-input-wrapper:focus-within {
