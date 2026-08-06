@@ -2,6 +2,7 @@
 import { ref, computed, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useVirtualList } from '../../composables/useVirtualList'
+import { useTransferTasks } from '../../composables/useTransferTasks'
 import ImagePreview from '../ImagePreview/index.vue'
 
 const IMAGE_EXT_SET = new Set([
@@ -66,10 +67,17 @@ function iconFor(entry: FileEntry): string {
 const currentDir = ref('')
 const entries = ref<FileEntry[]>([])
 const loading = ref(false)
-const uploading = ref(false)
 const fileInputRef = ref<HTMLInputElement | null>(null)
 
 const userId = computed(() => props.user?.id || '')
+
+/* --------------------------- 上传/下载进度 --------------------------- */
+
+// 进度列表状态是全局单例，面板由根组件常驻渲染，这里只负责把任务丢进队列
+const { uploadFiles, downloadFile } = useTransferTasks()
+
+/** 组件是否仍挂载：上传结束时若已切走页面，就不再刷新这里的列表 */
+let alive = true
 
 /** 面包屑片段：根目录 + 各级目录名 */
 const segments = computed(() =>
@@ -87,6 +95,9 @@ const { totalHeight, offsetY, visibleItems } = useVirtualList(
 )
 
 const showList = computed(() => !loading.value && entries.value.length > 0)
+
+/** 骨架屏行数（首屏 / 切目录时展示，样式对齐 pc-genflow-pro netdisk 的 FileList） */
+const SKELETON_ROWS = 12
 
 /* --------------------------- 图片预览 --------------------------- */
 
@@ -107,6 +118,8 @@ function openImagePreview(entry: FileEntry) {
 async function loadList() {
   if (!userId.value) return
   loading.value = true
+  // 先清空再拉取：切目录时直接过渡到骨架屏，避免旧目录内容停留造成错位
+  entries.value = []
   closeRowMenu()
   try {
     const res = await fetch(
@@ -139,7 +152,8 @@ function goToCrumb(index: number) {
 /* --------------------------- 行内更多菜单 --------------------------- */
 
 const MENU_WIDTH = 160
-const MENU_HEIGHT = 84
+const MENU_PADDING = 8
+const MENU_ITEM_HEIGHT = 32
 const MENU_GAP = 4
 
 const activeMenuPath = ref<string | null>(null)
@@ -158,7 +172,10 @@ function openRowMenu(entry: FileEntry, ev: MouseEvent) {
   cancelCloseTimer()
   const trigger = ev.currentTarget as HTMLElement
   const rect = trigger.getBoundingClientRect()
-  const openUpward = window.innerHeight - rect.bottom < MENU_HEIGHT + MENU_GAP
+  // 文件多一项「下载」，菜单高度不同，翻转判断要按实际项数算
+  const itemCount = entry.isDir ? 2 : 3
+  const menuHeight = MENU_PADDING + itemCount * MENU_ITEM_HEIGHT
+  const openUpward = window.innerHeight - rect.bottom < menuHeight + MENU_GAP
   menuStyle.value = {
     left: `${rect.right - MENU_WIDTH}px`,
     ...(openUpward
@@ -186,6 +203,14 @@ function handleRenameFromMenu() {
   if (target) openRename(target)
 }
 
+/** 下载：交给传输队列，进度在右下角进度列表里展示 */
+function handleDownloadFromMenu() {
+  const target = menuTarget.value
+  closeRowMenu()
+  if (!target || target.isDir) return
+  downloadFile(target, userId.value)
+}
+
 function handleDeleteFromMenu() {
   const target = menuTarget.value
   closeRowMenu()
@@ -198,34 +223,19 @@ function triggerUpload() {
   fileInputRef.value?.click()
 }
 
-async function onFileChange(e: Event) {
+function onFileChange(e: Event) {
   const input = e.target as HTMLInputElement
   const files = Array.from(input.files ?? [])
   input.value = ''
   if (!files.length || !userId.value) return
 
-  uploading.value = true
-  let ok = 0
-  for (const file of files) {
-    try {
-      const fd = new FormData()
-      fd.append('file', file)
-      const res = await fetch(
-        `${BASE}/upload?userId=${encodeURIComponent(userId.value)}&dir=${encodeURIComponent(currentDir.value)}`,
-        { method: 'POST', body: fd },
-      )
-      const data = await res.json()
-      if (data.code !== 0) throw new Error(data.message || '上传失败')
-      ok += 1
-    } catch (err) {
-      ElMessage.error(`「${file.name}」上传失败: ` + (err as Error).message)
+  // 逐个文件建任务入队，进度在右下角进度列表里展示
+  uploadFiles(files, { userId: userId.value, dir: currentDir.value }, (ok) => {
+    if (ok > 0) {
+      ElMessage.success(`成功上传 ${ok} 个文件`)
+      if (alive) loadList()
     }
-  }
-  uploading.value = false
-  if (ok > 0) {
-    ElMessage.success(`成功上传 ${ok} 个文件`)
-    loadList()
-  }
+  })
 }
 
 /* --------------------------- 新建文件夹 --------------------------- */
@@ -390,7 +400,10 @@ function formatTime(ts: number): string {
 }
 
 onMounted(loadList)
-onBeforeUnmount(cancelCloseTimer)
+onBeforeUnmount(() => {
+  alive = false
+  cancelCloseTimer()
+})
 </script>
 
 <template>
@@ -420,12 +433,12 @@ onBeforeUnmount(cancelCloseTimer)
           <span>新建文件夹</span>
         </div>
         <!-- 上传文件：反色主按钮（对齐 TeamFileActionButton primary） -->
-        <div class="fm-action-btn primary" :class="{ disabled: uploading }" @click="triggerUpload">
+        <div class="fm-action-btn primary" @click="triggerUpload">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
             <path d="M8 10.5V3M8 3L5 6M8 3l3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
             <path d="M3 11v1.5a1 1 0 001 1h8a1 1 0 001-1V11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
           </svg>
-          <span>{{ uploading ? '上传中...' : '上传文件' }}</span>
+          <span>上传文件</span>
         </div>
         <input
           ref="fileInputRef"
@@ -447,18 +460,30 @@ onBeforeUnmount(cancelCloseTimer)
         <div class="col-ops">操作</div>
       </div>
 
-      <!-- 空 / 加载态 -->
-      <div v-if="loading" class="fm-empty">加载中...</div>
-      <div v-else-if="entries.length === 0" class="fm-empty">当前文件夹为空</div>
+      <!-- 空态 -->
+      <div v-if="!loading && entries.length === 0" class="fm-empty">当前文件夹为空</div>
 
-      <!-- 虚拟滚动区 -->
+      <!-- 滚动区：加载中在同一容器内展示骨架屏，加载完成后展示虚拟列表 -->
       <div
-        v-show="showList"
+        v-show="loading || showList"
         ref="scrollContainer"
         class="fm-list-scroll"
         @scroll="closeRowMenu"
       >
-        <div class="fm-virtual-phantom" :style="{ height: `${totalHeight}px` }">
+        <!-- 骨架屏：行高/列宽与真实行一致，避免加载完成后跳动 -->
+        <template v-if="loading">
+          <div v-for="n in SKELETON_ROWS" :key="n" class="fm-skeleton-row">
+            <div class="col-name">
+              <span class="fm-sk-block" style="width: 24px; flex-shrink: 0"></span>
+              <span class="fm-sk-block" style="width: 50%"></span>
+            </div>
+            <div class="col-size"><span class="fm-sk-block" style="width: 66.67%"></span></div>
+            <div class="col-time"><span class="fm-sk-block" style="width: 66.67%"></span></div>
+            <div class="col-ops"><span class="fm-sk-block" style="width: 50%"></span></div>
+          </div>
+        </template>
+
+        <div v-show="showList" class="fm-virtual-phantom" :style="{ height: `${totalHeight}px` }">
           <div :style="{ transform: `translateY(${offsetY}px)` }">
             <div
               v-for="{ item } in visibleItems"
@@ -531,6 +556,7 @@ onBeforeUnmount(cancelCloseTimer)
         @mouseenter="cancelCloseTimer"
         @mouseleave="scheduleCloseMenu"
       >
+        <div class="fm-row-menu-item" v-if="!menuTarget?.isDir" @click="handleDownloadFromMenu">下载</div>
         <div class="fm-row-menu-item" @click="handleRenameFromMenu">重命名</div>
         <div class="fm-row-menu-item danger" @click="handleDeleteFromMenu">删除</div>
       </div>
@@ -898,6 +924,45 @@ onBeforeUnmount(cancelCloseTimer)
   justify-content: center;
   color: var(--gf-text-disabled);
   font-size: 14px;
+}
+
+/* 骨架屏：与 pc-genflow-pro team/components/file 的 TeamFileList 一致，
+   色块为「底色 + 扫光叠加层」两层，1.6s 从左到右循环平移 */
+.fm-skeleton-row {
+  display: flex;
+  align-items: center;
+  height: 44px;
+  margin-bottom: 6px;
+  padding: 0 16px;
+  border-radius: 8px;
+}
+
+.fm-sk-block {
+  position: relative;
+  display: block;
+  height: 24px;
+  border-radius: 8px;
+  overflow: hidden;
+  /* 底色要和文件管理页背景（--gf-bg-page）拉开对比，否则骨架屏看不见 */
+  background: linear-gradient(90deg, var(--gf-bg-elevated-hover), transparent);
+}
+
+.fm-sk-block::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, var(--gf-bg-panel) 50%, transparent);
+  animation: fm-skeleton-shimmer 1.6s ease-in-out infinite;
+}
+
+@keyframes fm-skeleton-shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+
+  100% {
+    transform: translateX(100%);
+  }
 }
 
 .fm-input {

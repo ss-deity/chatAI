@@ -279,7 +279,7 @@ onUnmounted(() => {
   </Teleport>
 </template>
 
-<style>
+<style scoped>
 .image-preview-mask {
   position: fixed;
   inset: 0;
