@@ -12,6 +12,8 @@ import FileManager from './components/FileManager/index.vue'
 import ModelSelect from './components/ModelSelect/index.vue'
 import ImageCard from './components/ImageCard/index.vue'
 import FileGrid from './components/FileGrid/index.vue'
+import TransferPanel from './components/TransferPanel/index.vue'
+import { useTransferTasks } from './composables/useTransferTasks'
 import { DEFAULT_MODEL_TYPE, getModel } from './config/models'
 import { fetchSSE, cancelSSE } from './utils/sse'
 import {
@@ -600,6 +602,20 @@ function collectSkillIds(): string[] {
     .filter(Boolean)
   return [...new Set(ids)]
 }
+
+/* ---------- 上传 / 下载进度列表 ---------- */
+
+/**
+ * 进度面板挂在根组件上常驻：文件管理页卸载后传输任务与进度依旧保留，
+ * 只有用户主动关闭面板（closeTransfer）才会取消并清空列表。
+ */
+const {
+  tasks: transferTasks,
+  visible: transferVisible,
+  cancel: cancelTransfer,
+  cancelAll: cancelAllTransfers,
+  close: closeTransfer,
+} = useTransferTasks()
 
 /* ---------- 自动化任务：模板插入（抄自 enterprise-genclaw 的 customInput） ---------- */
 
@@ -1721,6 +1737,15 @@ watch(
         </div>
       </div>
     </div>
+
+    <!-- 上传 / 下载进度列表：常驻根组件，切页面不中断、不清空 -->
+    <TransferPanel
+      :visible="transferVisible"
+      :tasks="transferTasks"
+      @cancel="cancelTransfer"
+      @cancel-all="cancelAllTransfers"
+      @close="closeTransfer"
+    />
   </div>
 </template>
 
