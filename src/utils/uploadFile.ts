@@ -92,6 +92,14 @@ export const MODEL_UPLOAD_CONFIG: Record<string, UploadConfig> = {
     hitWord:
       '上传附件，最多3个，文档支持 pdf、txt、csv、xlsx，图片支持 png、jpeg、webp，文档最大 50MB（xlsx 20MB），图片最大 30MB',
   },
+  'openapi': {
+    maxCount: 3,
+    maxImgCompressLimit: 7,
+    targetCompressMB: 3,
+    fileType: `image/png,image/jpeg,image/webp,application/pdf,text/plain,text/csv,${XLSX_MIME}`,
+    hitWord:
+      '上传附件，最多3个，文档支持 pdf、txt、csv、xlsx，图片支持 png、jpeg、webp，文档最大 50MB（xlsx 20MB），图片最大 30MB',
+  },
   'jimeng-v4.6': {
     maxCount: 5,
     maxImgCompressLimit: 15,
