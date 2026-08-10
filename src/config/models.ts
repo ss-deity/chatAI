@@ -23,6 +23,12 @@ export const MODELS: ModelOption[] = [
     desc: '通用文本对话',
     supportsThinking: true,
   },
+  {
+    type: 'openapi',
+    label: 'openApi',
+    capability: 'text',
+    desc: '内部 OneAPI 网关（默认 gpt-5.5）',
+  },
   { type: 'jimeng-v4.6', label: 'JiMeng-V4.6', capability: 'image', desc: '即梦 AI 图片生成' },
 ]
 
