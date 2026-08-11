@@ -488,8 +488,8 @@ const handleKeyDown = (e: Event) => {
         return;
     }
 
-    // Backspace：光标紧跟在 contenteditable="false" 节点后时，浏览器无法自动删除，需手动处理
-    if (ke.key === 'Backspace') {
+    // Backspace / Delete：光标紧跟在 contenteditable="false" 节点后时，浏览器无法自动删除，需手动处理
+    if (ke.key === 'Backspace' || ke.key === 'Delete') {
         const sel = window.getSelection();
         // 处理 range 选区（如通过点击 span 产生的整体选中）：手动删除选区内容
         if (sel && !sel.isCollapsed && sel.rangeCount > 0 && inputEl.value) {
@@ -508,7 +508,7 @@ const handleKeyDown = (e: Event) => {
                 return;
             }
         }
-        if (sel && sel.isCollapsed && inputEl.value) {
+        if (ke.key === 'Backspace' && sel && sel.isCollapsed && inputEl.value) {
             const range = sel.getRangeAt(0);
             let prev: Node | null = null;
             if (range.startContainer === inputEl.value) {
@@ -600,13 +600,19 @@ const insertHtmlAtCursor = (html: string) => {
 
 const handlePaste = (e: Event) => {
     const ce = e as ClipboardEvent;
+
+    // 先派发给使用方：index.vue 里实现了完整的粘贴策略（图片走上传、技能 chip 保留、长度截断），
+    // 它接管时会 preventDefault 并自行写入内容，此时必须直接返回。
+    // 否则同一份剪贴板内容会被插入两次（表现为复制 1 个字、粘贴出 2 个字）。
+    emit('paste', ce);
+    if (ce.defaultPrevented) return;
+
     ce.preventDefault();
 
     // 优先检测是否含有我们自己写入的组件 HTML（data-vc-type 标记）
     const html = ce.clipboardData?.getData('text/html') || '';
     if (html && html.includes('data-vc-type')) {
         insertHtmlAtCursor(html);
-        emit('paste', ce);
         return;
     }
 
@@ -620,7 +626,6 @@ const handlePaste = (e: Event) => {
             nextTick(checkMultiLine);
         }
     }
-    emit('paste', ce);
 };
 
 /** 从 fragment/Element 中递归提取纯文本，跳过 contenteditable="false" 的元素组件 */

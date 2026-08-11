@@ -161,10 +161,23 @@ const supportsUpload = computed(() => !!uploadConfig.value)
 
 const uploadAccept = computed(() => uploadConfig.value?.fileType ?? '')
 
-const uploadTooltip = computed(() => uploadConfig.value?.hitWord ?? '添加附件')
+/** 附件已达当前模型上限：按 genclaw 的做法禁用上传 icon 并改提示文案 */
+const uploadMaxReached = computed(() => {
+  const cfg = uploadConfig.value
+  return !!cfg && pendingAttachments.value.length >= cfg.maxCount
+})
+
+/** 上传 icon 的悬浮提示（文案与交互对齐 enterprise-genclaw 的 uploadBtn） */
+const uploadTooltip = computed(() => {
+  const cfg = uploadConfig.value
+  if (cfg && uploadMaxReached.value) {
+    return `已达上传附件上限${cfg.maxCount}个`
+  }
+  return '上传附件'
+})
 
 function pickFile() {
-  if (!supportsUpload.value) return
+  if (!supportsUpload.value || uploadMaxReached.value) return
   if (!currentUser.value?.id) {
     ElMessage.warning('请先登录再上传附件')
     return
@@ -593,6 +606,51 @@ function handleSkillSelect(skill: Skill) {
   host.dispatchEvent(new Event('input', { bubbles: true }))
 }
 
+/** command -> 展示名，用于上屏时把 `/command` 还原成技能 tag */
+const skillCommandMap = computed(() => {
+  const map = new Map<string, string>()
+  skills.value.forEach((s) => {
+    if (s.command) map.set(s.command, s.name)
+  })
+  return map
+})
+
+/** 用户消息拆出来的片段：普通文本 / 技能 tag */
+type UserSegment = { type: 'text'; value: string } | { type: 'skill'; name: string }
+
+/**
+ * 把用户消息文本拆成「普通文本 + 技能 tag」。
+ * 输入框里的 chip 提交时序列化成 `/command`（见 buildFullMessage），
+ * 这里按已加载的技能列表反查，使上屏样式与输入框里的 tag 完全一致。
+ * 触发规则与 syncSkillPanelWithCursor 保持一致：`/` 必须在行首或空白之后。
+ */
+function splitUserContent(content: string): UserSegment[] {
+  const map = skillCommandMap.value
+  if (!content || map.size === 0) return content ? [{ type: 'text', value: content }] : []
+  const segs: UserSegment[] = []
+  let buf = ''
+  let i = 0
+  while (i < content.length) {
+    if (content[i] === '/' && (i === 0 || /[\s\u00A0]/.test(content[i - 1]))) {
+      const cmd = /^[\w-]+/.exec(content.slice(i + 1))?.[0]
+      const name = cmd ? map.get(cmd) : undefined
+      if (cmd && name) {
+        if (buf) {
+          segs.push({ type: 'text', value: buf })
+          buf = ''
+        }
+        segs.push({ type: 'skill', name })
+        i += 1 + cmd.length
+        continue
+      }
+    }
+    buf += content[i]
+    i += 1
+  }
+  if (buf) segs.push({ type: 'text', value: buf })
+  return segs
+}
+
 /** 当前输入框里生效的技能 id（按 chip 出现顺序，去重） */
 function collectSkillIds(): string[] {
   const host = inputRef.value
@@ -856,6 +914,8 @@ function handlePaste(e: ClipboardEvent) {
             if (el.dataset.elVal !== undefined) attrs['data-el-val'] = el.dataset.elVal
             if (el.dataset.textVal !== undefined) attrs['data-text-val'] = el.dataset.textVal
             if (el.dataset.mentionUrl !== undefined) attrs['data-mention-url'] = el.dataset.mentionUrl
+            // 技能 chip 必须带回 data-skill-id，否则 collectSkillIds 收不到，技能会静默失效
+            if (el.dataset.skillId !== undefined) attrs['data-skill-id'] = el.dataset.skillId
             segments.push({ type: 'span', label: el.textContent || '', attrs, cls: el.className || undefined })
           } else if (el.tagName === 'BR') {
             segments.push({ type: 'text', text: '\n' })
@@ -889,6 +949,14 @@ function handlePaste(e: ClipboardEvent) {
     .join('')
   document.execCommand('insertHTML', false, htmlStr)
 
+  void nextTick(handleInputChange)
+}
+
+/**
+ * 剪切（Cmd/Ctrl+X）由 ChatInput 内部 preventDefault 后手工删除选区，不会派发 input 事件，
+ * 这里显式补一次同步，避免技能面板停留在剪掉的 `/keyword` 上。
+ */
+function handleCut() {
   void nextTick(handleInputChange)
 }
 
@@ -1573,7 +1641,15 @@ watch(
                     :files="toAttachmentDisplay(msg.attachments)"
                     :closable="false"
                   />
-                  <div v-if="msg.content" class="message-bubble">{{ msg.content }}</div>
+                  <div v-if="msg.content" class="message-bubble">
+                    <template v-for="(seg, segIdx) in splitUserContent(msg.content)" :key="segIdx">
+                      <span
+                        v-if="seg.type === 'skill'"
+                        class="chat-skill__chip chat-skill__chip--sent"
+                      >{{ seg.name }}</span>
+                      <template v-else>{{ seg.value }}</template>
+                    </template>
+                  </div>
                 </div>
               </template>
             </div>
@@ -1624,6 +1700,7 @@ watch(
               @submit="handleSubmit"
               @input="handleInputChange"
               @paste="handlePaste"
+              @cut="handleCut"
               @blur="closeSkillPanel"
             />
             <!-- 隐藏的文件选择器 -->
@@ -1638,22 +1715,7 @@ watch(
             <div class="chat-operate">
               <div class="chat-operate-left">
                 <AutoTask />
-                <button
-                  v-if="supportsUpload"
-                  type="button"
-                  class="upload-btn"
-                  :title="uploadTooltip"
-                  @click="pickFile"
-                >
-                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                    <path
-                      d="M8 3v10M3 8h10"
-                      stroke="currentColor"
-                      stroke-width="1.6"
-                      stroke-linecap="round"
-                    />
-                  </svg>
-                </button>
+                <ModelSelect v-model="selectedModel" />
                 <button
                   v-if="supportsThinking"
                   type="button"
@@ -1683,51 +1745,67 @@ watch(
                   </svg>
                   <span>深度思考</span>
                 </button>
-                <ModelSelect v-model="selectedModel" />
               </div>
               <div class="chat-operate-right">
-              <!-- 生成中：暂停 + 终止 -->
+              <!-- 上传附件：icon 样式，紧邻发送按钮（对齐 enterprise-genclaw 的 uploadBtn） -->
+              <span
+                v-if="supportsUpload"
+                class="icon-tip-wrap"
+                :data-tip="uploadTooltip"
+              >
+                <button
+                  type="button"
+                  class="upload-icon-btn"
+                  :disabled="uploadMaxReached"
+                  @click="pickFile"
+                ></button>
+              </span>
+
+              <!-- 生成中：暂停 + 终止（对齐 genclaw generatingInput 的 operation-area） -->
               <template v-if="loading && !paused">
-                <button class="ctrl-btn pause-btn" title="暂停生成" @click="handlePause">
-                  <svg width="16" height="16" viewBox="0 0 1024 1024" fill="none">
-                    <path d="M512 66.56a445.44 445.44 0 1 0 0 890.88 445.44 445.44 0 0 0 0-890.88z M138.24 512a373.76 373.76 0 1 1 747.52 0 373.76 373.76 0 0 1-747.52 0z m230.4-153.6a25.6 25.6 0 0 0-25.6 25.6v256a25.6 25.6 0 0 0 25.6 25.6h51.2a25.6 25.6 0 0 0 25.6-25.6v-256a25.6 25.6 0 0 0-25.6-25.6h-51.2z m204.8 0a25.6 25.6 0 0 0-25.6 25.6v256a25.6 25.6 0 0 0 25.6 25.6h51.2a25.6 25.6 0 0 0 25.6-25.6v-256a25.6 25.6 0 0 0-25.6-25.6h-51.2z" fill="currentColor"/>
-                  </svg>
-                  <span>暂停</span>
-                </button>
-                <button class="ctrl-btn stop-btn" title="终止生成" @click="handleStop">
-                  <svg width="16" height="16" viewBox="0 0 1024 1024" fill="none">
-                    <path d="M512 66.56a445.44 445.44 0 1 0 0 890.88 445.44 445.44 0 0 0 0-890.88z M138.24 512a373.76 373.76 0 1 1 747.52 0 373.76 373.76 0 0 1-747.52 0z m245.76-153.6a25.6 25.6 0 0 0-25.6 25.6v256a25.6 25.6 0 0 0 25.6 25.6h256a25.6 25.6 0 0 0 25.6-25.6v-256a25.6 25.6 0 0 0-25.6-25.6h-256z" fill="currentColor"/>
-                  </svg>
-                  <span>终止</span>
-                </button>
+                <span class="icon-tip-wrap" data-tip="暂停生成">
+                  <button
+                    type="button"
+                    class="ctrl-icon-btn ctrl-icon-btn--pause"
+                    @click="handlePause"
+                  ></button>
+                </span>
+                <span class="icon-tip-wrap" data-tip="终止任务">
+                  <button
+                    type="button"
+                    class="ctrl-icon-btn ctrl-icon-btn--stop"
+                    @click="handleStop"
+                  ></button>
+                </span>
               </template>
 
               <!-- 暂停中：继续 + 终止 -->
               <template v-else-if="paused">
-                <button class="ctrl-btn resume-btn" title="继续生成" @click="handleResume">
-                  <svg width="16" height="16" viewBox="0 0 1024 1024" fill="none">
-                    <path d="M512 66.56a445.44 445.44 0 1 0 0 890.88 445.44 445.44 0 0 0 0-890.88z M138.24 512a373.76 373.76 0 1 1 747.52 0 373.76 373.76 0 0 1-747.52 0z m256-179.2a25.6 25.6 0 0 0-25.6 25.6v307.2a25.6 25.6 0 0 0 38.4 22.19l256-153.6a25.6 25.6 0 0 0 0-44.38l-256-153.6a25.6 25.6 0 0 0-12.8-3.41z" fill="currentColor"/>
-                  </svg>
-                  <span>继续</span>
-                </button>
-                <button class="ctrl-btn stop-btn" title="终止生成" @click="handleStop">
-                  <svg width="16" height="16" viewBox="0 0 1024 1024" fill="none">
-                    <path d="M512 66.56a445.44 445.44 0 1 0 0 890.88 445.44 445.44 0 0 0 0-890.88z M138.24 512a373.76 373.76 0 1 1 747.52 0 373.76 373.76 0 0 1-747.52 0z m245.76-153.6a25.6 25.6 0 0 0-25.6 25.6v256a25.6 25.6 0 0 0 25.6 25.6h256a25.6 25.6 0 0 0 25.6-25.6v-256a25.6 25.6 0 0 0-25.6-25.6h-256z" fill="currentColor"/>
-                  </svg>
-                  <span>终止</span>
-                </button>
+                <span class="icon-tip-wrap" data-tip="继续生成">
+                  <button
+                    type="button"
+                    class="ctrl-icon-btn ctrl-icon-btn--resume"
+                    @click="handleResume"
+                  ></button>
+                </span>
+                <span class="icon-tip-wrap" data-tip="终止任务">
+                  <button
+                    type="button"
+                    class="ctrl-icon-btn ctrl-icon-btn--stop"
+                    @click="handleStop"
+                  ></button>
+                </span>
               </template>
 
-              <!-- 空闲：发送按钮 -->
+              <!-- 空闲：发送按钮（icon 样式，对齐 enterprise-genclaw 的 sendBtn） -->
               <button
                 v-else
-                class="send-btn"
-                :class="{ disabled: !inputText.trim() }"
+                type="button"
+                class="send-icon-btn"
+                :class="{ 'send-disabled': !inputText.trim() }"
                 :disabled="!inputText.trim()"
                 @click="handleSubmit"
-              >
-                发送
-              </button>
+              ></button>
               </div>
             </div>
           </div>
@@ -1843,17 +1921,26 @@ html, body, #app {
   color: var(--gf-text-tertiary);
 }
 
-/* ---- 输入框里的技能 chip：/ 选中技能后回填的不可编辑标签 ---- */
+/* ---- 输入框里的技能 chip：/ 选中技能后回填的不可编辑标签 ----
+   配色走 --gf-tag-*，浅色取 genclaw 的 #f3f9ff/#258aff，深色自动切换；
+   加一层描边保证它在输入框底色和用户气泡底色上都能被识别为 tag。 */
 .chat-skill__chip {
   display: inline-block;
   padding: 0 6px;
+  border: 1px solid var(--gf-tag-border);
   border-radius: 4px;
-  background: var(--gf-primary-bg);
-  color: var(--gf-primary);
+  background: var(--gf-tag-bg);
+  color: var(--gf-tag-text);
   font-size: 13px;
   line-height: 20px;
   user-select: none;
   cursor: default;
+}
+
+/* ---- 上屏后会话里的技能 tag：复用输入框 chip 的视觉，只放开文本选中 ---- */
+.chat-skill__chip--sent {
+  user-select: text;
+  cursor: inherit;
 }
 </style>
 
@@ -1863,9 +1950,10 @@ html, body, #app {
   width: 100%;
   height: 100%;
   overflow: hidden;
-  background: var(--gf-bg-page);
+  background: var(--gf-bg-panel);
 }
 
+/* 会话区底色与侧边栏（--gf-bg-panel）保持一致，对齐 genclaw 里两侧同为 #fff 的做法 */
 .main-container {
   position: relative;
   flex: 1 1 auto;
@@ -1874,7 +1962,7 @@ html, body, #app {
   justify-content: center;
   align-items: center;
   min-width: 560px;
-  background: var(--gf-bg-page);
+  background: var(--gf-bg-panel);
 }
 
 .chat-wrapper {
@@ -2011,7 +2099,13 @@ html, body, #app {
   word-break: break-word;
 }
 
+/* 用户气泡：几何与配色对齐 enterprise-genclaw 的 .wp-genflow-user-text-message__text
+   （浅灰底 + 深色文字，非蓝底白字），深浅色由 --gf-bubble-user-* 驱动 */
 .message-item.user .message-bubble {
+  max-width: 90%;
+  padding: 12px 16px;
+  min-height: 28px;
+  line-height: 26px;
   background: var(--gf-bubble-user-bg);
   color: var(--gf-bubble-user-text);
 }
@@ -2165,7 +2259,9 @@ html, body, #app {
   border: 1px solid var(--gf-border-strong);
   border-radius: 12px;
   padding: 12px 16px;
-  background: var(--gf-bg-panel);
+  /* 会话区底色改成与侧边栏同色后，输入框改用 --gf-bg-input 才能拉开层次
+     （genclaw 同样是白色画布 + #f5f7fb 输入框） */
+  background: var(--gf-bg-input);
   transition: border-color 0.2s, background-color 0.2s;
 }
 
@@ -2251,25 +2347,69 @@ html, body, #app {
 }
 
 /* 上传附件按钮：与 thinking-btn 视觉风格一致 */
-.upload-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border: 1px solid var(--gf-border-strong);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--gf-text-regular);
-  cursor: pointer;
+/* 上传附件：36×36 圆角 icon，hover/active 加底色（对齐 genclaw uploadBtn）。
+   图标走 CSS mask 上色，深色模式下随 --gf-text-primary 自动反色。 */
+.upload-icon-btn {
+  width: 36px;
+  height: 36px;
   padding: 0;
-  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  border: none;
+  border-radius: 8px;
+  background-color: transparent;
+  cursor: pointer;
+  transition: background-color 0.15s;
 }
 
-.upload-btn:hover {
-  background: var(--gf-bg-elevated);
-  border-color: var(--gf-primary);
-  color: var(--gf-primary);
+.upload-icon-btn::before {
+  content: '';
+  display: block;
+  width: 36px;
+  height: 36px;
+  background-color: var(--gf-text-primary);
+  -webkit-mask: url('./assets/input/new-upload.png') no-repeat center / contain;
+  mask: url('./assets/input/new-upload.png') no-repeat center / contain;
+}
+
+.upload-icon-btn:hover {
+  background-color: var(--gf-bg-elevated);
+}
+
+.upload-icon-btn:active {
+  background-color: var(--gf-bg-elevated-hover);
+}
+
+.upload-icon-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* icon 按钮的悬浮提示（element-plus 的 tooltip 未全局注册，这里用纯 CSS 实现） */
+.icon-tip-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.icon-tip-wrap::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: rgba(3, 11, 26, 0.85);
+  color: #fff;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+  z-index: 10;
+}
+
+.icon-tip-wrap:hover::after {
+  opacity: 1;
 }
 
 .upload-file-input {
@@ -2296,72 +2436,83 @@ html, body, #app {
   gap: 8px;
 }
 
-.send-btn {
-  width: 60px;
-  height: 32px;
-  border-radius: 8px;
+/* 发送按钮：36×36 圆形 icon，hover / 禁用切换图片（对齐 genclaw sendBtn） */
+.send-icon-btn {
+  width: 36px;
+  height: 36px;
+  padding: 0;
   border: none;
-  background: var(--gf-primary);
-  color: var(--gf-primary-inverse);
-  font-size: 14px;
+  border-radius: 100%;
+  background-color: transparent;
+  background-image: url('./assets/input/send.png');
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center center;
   cursor: pointer;
-  transition: background 0.2s;
 }
 
-.send-btn:hover:not(.disabled) {
-  background: var(--gf-primary-hover);
+.send-icon-btn:hover:not(.send-disabled) {
+  background-image: url('./assets/input/send-hover.png');
 }
 
-.send-btn.disabled {
-  background: var(--gf-border-strong);
-  color: var(--gf-text-tertiary);
+.send-icon-btn.send-disabled {
   cursor: not-allowed;
+  background-image: url('./assets/input/send-disable.png');
 }
 
-.ctrl-btn {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  height: 32px;
-  padding: 0 12px;
+/**
+ * 生成中的控制按钮（暂停 / 继续 / 终止）：
+ * 尺寸与 hover 交互对齐 enterprise-genclaw generatingInput.vue 的 .operation-area
+ * （36×36 命中区 + 25×25 图标 + hover 底色，图标本身只有 tooltip、无文字）。
+ * 图标用 CSS mask 上色，因此深色模式下随 --gf-text-primary 自动反色。
+ */
+.ctrl-icon-btn {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
   border-radius: 8px;
-  border: 1px solid var(--gf-border-strong);
-  background: var(--gf-bg-elevated);
-  color: var(--gf-text-regular);
-  font-size: 14px;
+  background-color: transparent;
   cursor: pointer;
-  transition: background 0.15s;
+  transition: background-color 0.15s;
 }
 
-.ctrl-btn:hover {
-  background: var(--gf-bg-elevated-hover);
+.ctrl-icon-btn::before {
+  content: '';
+  display: block;
+  width: 25px;
+  height: 25px;
+  margin: 0 auto;
+  background-color: var(--gf-text-primary);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
 }
 
-.ctrl-btn:active {
-  background: var(--gf-bg-elevated-hover);
+.ctrl-icon-btn:hover {
+  background-color: var(--gf-bg-elevated);
 }
 
-.ctrl-btn svg {
-  width: 16px;
-  height: 16px;
+.ctrl-icon-btn:active {
+  background-color: var(--gf-bg-elevated-hover);
 }
 
-.stop-btn {
-  color: var(--gf-danger);
-  border-color: var(--gf-danger-border);
+.ctrl-icon-btn--pause::before {
+  -webkit-mask-image: url('./assets/input/pause.svg');
+  mask-image: url('./assets/input/pause.svg');
 }
 
-.stop-btn:hover {
-  background: var(--gf-danger-bg);
+.ctrl-icon-btn--resume::before {
+  -webkit-mask-image: url('./assets/input/resume.svg');
+  mask-image: url('./assets/input/resume.svg');
 }
 
-.resume-btn {
-  color: var(--gf-primary);
-  border-color: var(--gf-primary-bg);
-}
-
-.resume-btn:hover {
-  background: var(--gf-primary-bg);
+.ctrl-icon-btn--stop::before {
+  -webkit-mask-image: url('./assets/input/stop.svg');
+  mask-image: url('./assets/input/stop.svg');
 }
 
 .footer-ai-tips {

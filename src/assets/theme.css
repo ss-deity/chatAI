@@ -35,6 +35,11 @@
   --gf-primary-bg: #ecf5ff;
   --gf-primary-inverse: #ffffff;
 
+  /* 技能 tag（输入框 chip 与上屏消息共用，取 genclaw 的 #f3f9ff / #258aff） */
+  --gf-tag-bg: #f3f9ff;
+  --gf-tag-text: #258aff;
+  --gf-tag-border: rgba(37, 138, 255, 0.18);
+
   /* 深色主按钮（登录/注册/主要弹窗） */
   --gf-accent: #030b1a;
   --gf-accent-hover: #1a2333;
@@ -45,9 +50,9 @@
   --gf-danger-bg: #fef0f0;
   --gf-danger-border: #fde2e2;
 
-  /* 消息气泡 */
-  --gf-bubble-user-bg: #1677ff;
-  --gf-bubble-user-text: #ffffff;
+  /* 消息气泡（对齐 enterprise-genclaw 的 .wp-genflow-user-text-message__text） */
+  --gf-bubble-user-bg: #f5f7fb;
+  --gf-bubble-user-text: #222222;
   --gf-bubble-assistant-bg: #f0f2f5;
   --gf-bubble-assistant-text: #333333;
 
@@ -95,6 +100,11 @@
   --gf-primary-bg: #1e3057;
   --gf-primary-inverse: #ffffff;
 
+  /* 技能 tag */
+  --gf-tag-bg: #1e3057;
+  --gf-tag-text: #6ba1ff;
+  --gf-tag-border: rgba(107, 161, 255, 0.28);
+
   /* 深色主按钮 */
   --gf-accent: #f1f5f9;
   --gf-accent-hover: #ffffff;
@@ -106,9 +116,9 @@
   --gf-danger-border: #4a2828;
 
   /* 消息气泡 */
-  --gf-bubble-user-bg: #4c8bff;
-  --gf-bubble-user-text: #ffffff;
-  --gf-bubble-assistant-bg: #1e2a44;
+  --gf-bubble-user-bg: #1e2a44;
+  --gf-bubble-user-text: #e2e8f0;
+  --gf-bubble-assistant-bg: #223052;
   --gf-bubble-assistant-text: #e2e8f0;
 
   /* 阴影 */

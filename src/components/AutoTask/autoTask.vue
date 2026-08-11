@@ -137,7 +137,7 @@ onUnmounted(() => {
     width: 118px;
     height: 32px;
     box-sizing: border-box;
-    border: 1px solid #ebeef5;
+    border: 1px solid var(--gf-border);
     border-radius: 8px;
     display: flex;
     flex-direction: row;
@@ -149,17 +149,17 @@ onUnmounted(() => {
 
     &:hover {
         .auto-task-icon-mask {
-            background-color: #495366;
+            background-color: var(--gf-text-secondary);
         }
         .work-space-title {
-            color: #495366;
+            color: var(--gf-text-secondary);
         }
     }
 
     .auto-task-icon-mask {
         width: 16px;
         height: 16px;
-        background-color: #030b1a;
+        background-color: var(--gf-text-primary);
         -webkit-mask: url('@/assets/input/oc-add.svg') no-repeat center / contain;
         mask: url('@/assets/input/oc-add.svg') no-repeat center / contain;
     }
@@ -169,7 +169,7 @@ onUnmounted(() => {
         font-size: 12px;
         font-weight: 500;
         line-height: 16px;
-        color: #030b1a;
+        color: var(--gf-text-primary);
         max-width: 180px;
         white-space: nowrap;
         overflow: hidden;
