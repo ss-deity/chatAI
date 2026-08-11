@@ -72,10 +72,10 @@ const emit = defineEmits<{
 <style lang="scss" scoped>
 .auto-task-history-panel {
     width: 256px;
-    background: #ffffff;
+    background: var(--gf-bg-panel);
     border-radius: 8px;
-    border: 1px solid #f5f7fa;
-    box-shadow: 0px 2px 16px 2px rgba(73, 83, 102, 0.16);
+    border: 1px solid var(--gf-border);
+    box-shadow: var(--gf-shadow-menu);
     padding: 4px;
     display: flex;
     flex-direction: column;
@@ -94,7 +94,7 @@ const emit = defineEmits<{
     }
 
     &::-webkit-scrollbar-thumb {
-        background: #ccd2df !important;
+        background: var(--gf-scrollbar-thumb) !important;
         border-radius: 99px;
     }
 }
@@ -111,7 +111,7 @@ const emit = defineEmits<{
     box-sizing: border-box;
 
     &:hover {
-        background-color: #f5f7fa;
+        background-color: var(--gf-bg-elevated);
     }
 }
 
@@ -167,7 +167,7 @@ const emit = defineEmits<{
     font-family: 'PingFang SC', sans-serif;
     font-size: 14px;
     font-weight: 400;
-    color: #030b1a;
+    color: var(--gf-text-primary);
     line-height: 22px;
     white-space: nowrap;
     overflow: hidden;
@@ -178,7 +178,7 @@ const emit = defineEmits<{
     font-family: 'PingFang SC', sans-serif;
     font-size: 12px;
     font-weight: 400;
-    color: #a2abbd;
+    color: var(--gf-text-disabled);
     line-height: 18px;
     white-space: nowrap;
     overflow: hidden;
