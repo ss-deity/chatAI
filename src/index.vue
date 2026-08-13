@@ -42,6 +42,7 @@ import { selectedAutoTaskKey, clearAutoTaskSelection } from './composables/useAu
 import { autoTaskMap } from './components/AutoTask/const'
 import { fetchMentionImages, type MentionFile } from './utils/mentionFiles'
 import SkillPanel from './components/SkillPanel/index.vue'
+import ToolCallInfo, { type ToolCall } from './components/ToolCallInfo/index.vue'
 import { fetchSkills, type Skill } from './utils/skills'
 import {
   menuItemTemplate,
@@ -68,6 +69,8 @@ interface Message {
   images?: string[]
   /** 用户消息附带的附件（图片/文档），发消息时随请求上传给后端 */
   attachments?: RemoteAttachment[]
+  /** 本条回复触发的工具调用及其状态，渲染在正文上方 */
+  toolCalls?: ToolCall[]
 }
 
 interface ChatConversation {
@@ -1153,12 +1156,21 @@ function renderMarkdown(content: string): string {
   }
 }
 
-function normalizeMessages(rawMessages: Array<{ role: string; content: string; images?: string[]; attachments?: RemoteAttachment[] }> | undefined): Message[] {
+/**
+ * 流式已开始但还没有任何可展示内容（文本 / 图片 / 工具调用），用「思考中...」占位。
+ */
+function isBlankAssistant(msg?: Message): boolean {
+  if (!msg || msg.role !== 'assistant') return false
+  return !msg.content && !msg.images?.length && !msg.toolCalls?.length
+}
+
+function normalizeMessages(rawMessages: Array<{ role: string; content: string; images?: string[]; attachments?: RemoteAttachment[]; toolCalls?: ToolCall[] }> | undefined): Message[] {
   return (rawMessages ?? []).map((item) => ({
     role: item.role === 'assistant' ? 'assistant' : 'user',
     content: item.content ?? '',
     images: item.images && item.images.length ? item.images : undefined,
     attachments: item.attachments && item.attachments.length ? item.attachments : undefined,
+    toolCalls: item.toolCalls && item.toolCalls.length ? item.toolCalls : undefined,
   }))
 }
 
@@ -1407,6 +1419,20 @@ function handleSubmit() {
           if (activeChatId.value === currentKey) scrollToBottom()
         }
       }
+      // 工具调用状态增量：同一个 id 覆盖更新（正在执行 -> 执行完成）
+      const tool = (payload.choices as Array<{ delta?: { tool?: ToolCall } }> | undefined)?.[0]?.delta?.tool
+      if (tool?.id) {
+        const s = sessionStates[currentKey]
+        const idx = s?.assistantIndex ?? -1
+        if (s && idx >= 0 && idx < s.messages.length) {
+          const list = [...(s.messages[idx].toolCalls ?? [])]
+          const at = list.findIndex((t) => t.id === tool.id)
+          if (at >= 0) list[at] = { ...list[at], status: tool.status }
+          else list.push({ ...tool })
+          s.messages[idx] = { ...s.messages[idx], toolCalls: list }
+          if (activeChatId.value === currentKey) scrollToBottom()
+        }
+      }
     },
     onMessage(content) {
       const s = sessionStates[currentKey]
@@ -1618,7 +1644,7 @@ watch(
         >
           <template v-for="(msg, idx) in messages" :key="idx">
             <div
-              v-if="!(loading && msg.role === 'assistant' && msg.content === '' && (!msg.images || msg.images.length === 0) && idx === messages.length - 1)"
+              v-if="!(loading && idx === messages.length - 1 && isBlankAssistant(msg))"
               class="message-item"
               :class="msg.role"
             >
@@ -1626,6 +1652,7 @@ watch(
                 v-if="msg.role === 'assistant'"
                 class="message-bubble markdown-body"
               >
+                <ToolCallInfo v-if="msg.toolCalls && msg.toolCalls.length" :tools="msg.toolCalls" />
                 <div v-if="msg.content" v-html="renderMarkdown(msg.content)"></div>
                 <ImageCard
                   v-if="msg.images && msg.images.length"
@@ -1655,7 +1682,7 @@ watch(
             </div>
           </template>
           <div
-            v-if="loading && messages[messages.length - 1]?.role === 'assistant' && messages[messages.length - 1]?.content === '' && (!messages[messages.length - 1]?.images || messages[messages.length - 1]?.images?.length === 0)"
+            v-if="loading && isBlankAssistant(messages[messages.length - 1])"
             class="message-item assistant"
           >
             <div class="message-bubble thinking">思考中...</div>
