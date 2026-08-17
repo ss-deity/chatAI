@@ -4,6 +4,7 @@ import { ElMessage } from 'element-plus'
 import { useVirtualList } from '../../composables/useVirtualList'
 import { useTransferTasks } from '../../composables/useTransferTasks'
 import ImagePreview from '../ImagePreview/index.vue'
+import FilePreview from '../FilePreview/index.vue'
 
 const IMAGE_EXT_SET = new Set([
   'jpg',
@@ -18,10 +19,25 @@ const IMAGE_EXT_SET = new Set([
   'jfif',
 ])
 
+const TEXT_EXT_SET = new Set(['txt', 'md', 'log', 'json', 'csv'])
+const PPT_EXT_SET = new Set(['ppt', 'pptx'])
+
 function isImageFile(entry: { name: string; isDir: boolean; url?: string }): boolean {
   if (entry.isDir || !entry.url) return false
   const ext = entry.name.split('.').pop()?.toLowerCase() || ''
   return IMAGE_EXT_SET.has(ext)
+}
+
+function isTextFileEntry(entry: { name: string; isDir: boolean; url?: string }): boolean {
+  if (entry.isDir || !entry.url) return false
+  const ext = entry.name.split('.').pop()?.toLowerCase() || ''
+  return TEXT_EXT_SET.has(ext)
+}
+
+function isPptFileEntry(entry: { name: string; isDir: boolean; url?: string }): boolean {
+  if (entry.isDir || !entry.url) return false
+  const ext = entry.name.split('.').pop()?.toLowerCase() || ''
+  return PPT_EXT_SET.has(ext)
 }
 
 interface UserInfo {
@@ -113,6 +129,17 @@ function openImagePreview(entry: FileEntry) {
   if (idx < 0) return
   previewIndex.value = idx
   previewVisible.value = true
+}
+
+/* --------------------------- 文件预览（PPT / TXT） --------------------------- */
+
+const filePreviewVisible = ref(false)
+const filePreviewFile = ref<{ url: string; name?: string; type?: 'ppt' | 'txt' } | null>(null)
+
+function openFilePreviewEntry(entry: FileEntry, type: 'ppt' | 'txt') {
+  if (!entry.url) return
+  filePreviewFile.value = { url: entry.url, name: entry.name, type }
+  filePreviewVisible.value = true
 }
 
 async function loadList() {
@@ -490,7 +517,15 @@ onBeforeUnmount(() => {
               :key="item.path"
               class="fm-row"
               :class="{ 'is-dir': item.isDir, 'is-image': isImageFile(item) }"
-              @dblclick="item.isDir ? enterFolder(item) : isImageFile(item) && openImagePreview(item)"
+              @dblclick="item.isDir
+                ? enterFolder(item)
+                : isImageFile(item)
+                  ? openImagePreview(item)
+                  : isPptFileEntry(item)
+                    ? openFilePreviewEntry(item, 'ppt')
+                    : isTextFileEntry(item)
+                      ? openFilePreviewEntry(item, 'txt')
+                      : undefined"
             >
               <div class="col-name">
                 <img :src="iconFor(item)" class="fm-icon" alt="" />
@@ -505,6 +540,18 @@ onBeforeUnmount(() => {
                   class="fm-name link"
                   :title="item.name"
                   @click="openImagePreview(item)"
+                >{{ item.name }}</span>
+                <span
+                  v-else-if="isPptFileEntry(item)"
+                  class="fm-name link"
+                  :title="item.name"
+                  @click="openFilePreviewEntry(item, 'ppt')"
+                >{{ item.name }}</span>
+                <span
+                  v-else-if="isTextFileEntry(item)"
+                  class="fm-name link"
+                  :title="item.name"
+                  @click="openFilePreviewEntry(item, 'txt')"
                 >{{ item.name }}</span>
                 <a
                   v-else-if="item.url"
@@ -545,6 +592,12 @@ onBeforeUnmount(() => {
       v-model:visible="previewVisible"
       :images="imageUrls"
       :initial-index="previewIndex"
+    />
+
+    <!-- PPT / 文本文件预览浮层 -->
+    <FilePreview
+      v-model:visible="filePreviewVisible"
+      :file="filePreviewFile"
     />
 
     <!-- 行内更多操作菜单（Teleport 到 body，fixed 定位，避免被虚拟列表 transform 裁剪） -->

@@ -43,6 +43,8 @@ import { autoTaskMap } from './components/AutoTask/const'
 import { fetchMentionImages, type MentionFile } from './utils/mentionFiles'
 import SkillPanel from './components/SkillPanel/index.vue'
 import ToolCallInfo, { type ToolCall } from './components/ToolCallInfo/index.vue'
+import ChatLoading from './components/ChatLoading/index.vue'
+import FilePreview from './components/FilePreview/index.vue'
 import { fetchSkills, type Skill } from './utils/skills'
 import {
   menuItemTemplate,
@@ -101,6 +103,8 @@ interface SessionState {
   sessionId: string
   /** 当前正在被 token 追加的 assistant 消息下标；无流式时为 -1 */
   assistantIndex: number
+  /** 本次生成的开始时间（毫秒），用于等待指示器计时 */
+  startedAt: number
 }
 
 type AuthPage = 'login' | 'register'
@@ -1156,12 +1160,60 @@ function renderMarkdown(content: string): string {
   }
 }
 
+/* --------------------------- 文件弹窗预览 --------------------------- */
+
+interface FilePreviewState {
+  visible: boolean
+  file: { url: string; name?: string; type?: 'ppt' | 'txt' } | null
+}
+
+const filePreview = reactive<FilePreviewState>({ visible: false, file: null })
+
+function openFilePreview(url: string, name?: string, type?: 'ppt' | 'txt') {
+  filePreview.file = { url, name, type }
+  filePreview.visible = true
+}
+
 /**
- * 流式已开始但还没有任何可展示内容（文本 / 图片 / 工具调用），用「思考中...」占位。
+ * 会话消息区的委托点击：当 assistant markdown 中出现 PPT 链接时，
+ * 拦截默认跳转/下载行为，改为弹窗预览。
  */
-function isBlankAssistant(msg?: Message): boolean {
-  if (!msg || msg.role !== 'assistant') return false
-  return !msg.content && !msg.images?.length && !msg.toolCalls?.length
+function handleMessageListClick(e: MouseEvent) {
+  const target = e.target as HTMLElement | null
+  if (!target) return
+  const anchor = target.closest('a') as HTMLAnchorElement | null
+  if (!anchor) return
+  // 只处理位于 assistant markdown-body 内的链接
+  if (!anchor.closest('.markdown-body')) return
+  const href = anchor.getAttribute('href') || ''
+  if (!href) return
+  const lower = href.toLowerCase().split('?')[0].split('#')[0]
+  if (lower.endsWith('.ppt') || lower.endsWith('.pptx')) {
+    e.preventDefault()
+    const name = anchor.textContent?.trim() || undefined
+    openFilePreview(href, name, 'ppt')
+  }
+}
+
+/**
+ * 是否处于「等待模型返回」状态：最后一条 assistant 消息还没有正文。
+ * 这段时间可能在等首个 token，也可能在等工具执行（如生成 PPT），
+ * 都需要给出可感知的等待反馈。
+ */
+function isWaiting(msg: Message, idx: number): boolean {
+  return (
+    loading.value &&
+    msg.role === 'assistant' &&
+    !msg.content &&
+    idx === messages.value.length - 1
+  )
+}
+
+/** 等待文案：工具在跑时说明在处理，否则就是在等模型思考 */
+function waitingLabel(msg: Message): string {
+  return msg.toolCalls?.some((t) => t.status === 'running')
+    ? '正在处理，请稍候'
+    : '正在思考'
 }
 
 function normalizeMessages(rawMessages: Array<{ role: string; content: string; images?: string[]; attachments?: RemoteAttachment[]; toolCalls?: ToolCall[] }> | undefined): Message[] {
@@ -1185,6 +1237,7 @@ function ensureSession(key: string): SessionState {
       paused: false,
       sessionId: '',
       assistantIndex: -1,
+      startedAt: 0,
     }
   }
   return sessionStates[key]
@@ -1336,6 +1389,7 @@ function handleSubmit() {
   state.assistantIndex = state.messages.length - 1
   state.loading = true
   state.paused = false
+  state.startedAt = Date.now()
   // 用户主动发送，视为想跟随最新回复
   stickToBottom.value = true
   scrollToBottom(true)
@@ -1641,10 +1695,10 @@ watch(
           ref="chatListRef"
           class="message-list"
           @scroll.passive="handleChatScroll"
+          @click="handleMessageListClick"
         >
           <template v-for="(msg, idx) in messages" :key="idx">
             <div
-              v-if="!(loading && idx === messages.length - 1 && isBlankAssistant(msg))"
               class="message-item"
               :class="msg.role"
             >
@@ -1654,6 +1708,11 @@ watch(
               >
                 <ToolCallInfo v-if="msg.toolCalls && msg.toolCalls.length" :tools="msg.toolCalls" />
                 <div v-if="msg.content" v-html="renderMarkdown(msg.content)"></div>
+                <ChatLoading
+                  v-if="isWaiting(msg, idx)"
+                  :label="waitingLabel(msg)"
+                  :start-at="activeSession?.startedAt"
+                />
                 <ImageCard
                   v-if="msg.images && msg.images.length"
                   :images="msg.images"
@@ -1681,12 +1740,6 @@ watch(
               </template>
             </div>
           </template>
-          <div
-            v-if="loading && isBlankAssistant(messages[messages.length - 1])"
-            class="message-item assistant"
-          >
-            <div class="message-bubble thinking">思考中...</div>
-          </div>
         </div>
 
         <!-- 首屏 Hero 标题：仅无消息时显示 -->
@@ -1850,6 +1903,12 @@ watch(
       @cancel="cancelTransfer"
       @cancel-all="cancelAllTransfers"
       @close="closeTransfer"
+    />
+
+    <!-- 会话内 PPT / 文本文件预览弹窗 -->
+    <FilePreview
+      v-model:visible="filePreview.visible"
+      :file="filePreview.file"
     />
   </div>
 </template>
@@ -2140,11 +2199,6 @@ html, body, #app {
 .message-item.assistant .message-bubble {
   background: var(--gf-bubble-assistant-bg);
   color: var(--gf-bubble-assistant-text);
-}
-
-.message-bubble.thinking {
-  color: var(--gf-text-tertiary);
-  font-style: italic;
 }
 
 /* Markdown 富文本样式 */
