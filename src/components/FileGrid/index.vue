@@ -8,6 +8,7 @@
 import { computed, ref } from 'vue'
 import type { Attachment } from '../../utils/uploadFile'
 import ImagePreview from '../ImagePreview/index.vue'
+import FilePreview from '../FilePreview/index.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -31,6 +32,23 @@ function isImage(a: Attachment): boolean {
   return a.type.startsWith('image/')
 }
 
+const TEXT_EXT_SET = new Set(['txt', 'md', 'log', 'json', 'csv'])
+const PPT_EXT_SET = new Set(['ppt', 'pptx'])
+
+function extOf(name: string): string {
+  const idx = name.lastIndexOf('.')
+  return idx >= 0 ? name.slice(idx + 1).toLowerCase() : ''
+}
+
+function isTextFile(a: Attachment): boolean {
+  if (a.type && a.type.startsWith('text/')) return true
+  return TEXT_EXT_SET.has(extOf(a.name))
+}
+
+function isPptFile(a: Attachment): boolean {
+  return PPT_EXT_SET.has(extOf(a.name))
+}
+
 /** 缩略图 src：优先本地对象 URL（上传中），完成后用远端 url */
 function thumbSrc(a: Attachment): string {
   return a.thumbnail || a.url || ''
@@ -44,6 +62,10 @@ const previewImages = computed(() =>
   props.files.filter(isImage).map((a) => a.url || a.thumbnail).filter(Boolean) as string[],
 )
 
+/** 文本/PPT 弹窗预览状态 */
+const filePreviewVisible = ref(false)
+const filePreviewFile = ref<{ url: string; name?: string; type?: 'ppt' | 'txt' } | null>(null)
+
 function handleClick(a: Attachment) {
   if (isImage(a)) {
     const list = props.files.filter(isImage)
@@ -53,7 +75,18 @@ function handleClick(a: Attachment) {
     previewVisible.value = true
     return
   }
-  if (a.url) window.open(a.url, '_blank', 'noopener')
+  if (!a.url) return
+  if (isPptFile(a)) {
+    filePreviewFile.value = { url: a.url, name: a.name, type: 'ppt' }
+    filePreviewVisible.value = true
+    return
+  }
+  if (isTextFile(a)) {
+    filePreviewFile.value = { url: a.url, name: a.name, type: 'txt' }
+    filePreviewVisible.value = true
+    return
+  }
+  window.open(a.url, '_blank', 'noopener')
 }
 </script>
 
@@ -112,6 +145,11 @@ function handleClick(a: Attachment) {
       v-model:visible="previewVisible"
       :images="previewImages"
       :initial-index="previewIndex"
+    />
+
+    <FilePreview
+      v-model:visible="filePreviewVisible"
+      :file="filePreviewFile"
     />
   </div>
 </template>
