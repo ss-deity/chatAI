@@ -33,8 +33,12 @@ export const MODELS: ModelOption[] = [
 ]
 
 /** 默认模型 */
-export const DEFAULT_MODEL_TYPE = 'deepseek-v4'
+export const DEFAULT_MODEL_TYPE = 'openapi'
 
 export function getModel(type: string): ModelOption {
-  return MODELS.find((m) => m.type === type) || MODELS[0]
+  return (
+    MODELS.find((m) => m.type === type) ||
+    MODELS.find((m) => m.type === DEFAULT_MODEL_TYPE) ||
+    MODELS[0]
+  )
 }

@@ -2,8 +2,8 @@
 export interface ToolCall {
   id: string
   name: string
-  /** running=正在执行，done=执行完成 */
-  status: 'running' | 'done'
+  /** running=正在执行，done=执行完成，failed=执行中断（会话报错时置为该态） */
+  status: 'running' | 'done' | 'failed'
 }
 </script>
 
@@ -36,6 +36,21 @@ const gradientId = `tool-call-spin-${Math.random().toString(36).slice(2, 11)}`
           :src="succeedIcon"
           alt=""
         />
+        <!-- 执行中断 -->
+        <svg
+          v-else-if="item.status === 'failed'"
+          class="tool-call-info__icon"
+          viewBox="0 0 16 16"
+          fill="none"
+        >
+          <circle cx="8" cy="8" r="6.6" stroke="#e64340" stroke-width="1.4" />
+          <path
+            d="M8 4.8v4M8 10.9v.5"
+            stroke="#e64340"
+            stroke-width="1.5"
+            stroke-linecap="round"
+          />
+        </svg>
         <!-- 正在执行：线性渐变环 + 旋转动画 -->
         <div
           v-else
@@ -66,6 +81,7 @@ const gradientId = `tool-call-spin-${Math.random().toString(36).slice(2, 11)}`
         </div>
       </span>
       <span class="tool-call-info__text">工具调用：{{ item.name }}</span>
+      <span v-if="item.status === 'failed'" class="tool-call-info__failed">已中断</span>
     </div>
   </div>
 </template>
@@ -90,6 +106,11 @@ const gradientId = `tool-call-spin-${Math.random().toString(36).slice(2, 11)}`
 
 .tool-call-info__text {
   color: #606a78;
+}
+
+.tool-call-info__failed {
+  color: var(--gf-danger, #e64340);
+  font-size: 12px;
 }
 
 .tool-call-info__status {
