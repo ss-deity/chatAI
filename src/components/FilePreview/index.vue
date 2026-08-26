@@ -1,14 +1,17 @@
 <script setup lang="ts">
 /**
- * 通用文件预览浮层：支持 PPT/PPTX（图片轮播）与 TXT 等文本文件。
+ * 通用文件预览浮层：支持 PPT/PPTX（纯前端解析渲染）与 TXT 等文本文件。
  *
- * - PPT：调用 /api/ppt/pages 拿到分页图片 URL 列表（后端 soffice + pdftoppm 转换 + BOS 缓存），
- *   预览器提供缩略图、缩放、上一页/下一页、全屏、页码、下载原始 PPTX 的能力
+ * - PPTX：在浏览器里 JSZip 解压 + 解析 OOXML → Slide JSON → HTML/CSS 渲染（见 pptx.ts），
+ *   不依赖 LibreOffice、不需要后端转换。预览器提供缩略图、缩放、上一页/下一页、全屏、页码、下载。
+ *   pptx 字节仍走 /api/files/raw 同源代理拿，因为 BOS 直链没开 CORS，浏览器 fetch 会被拦。
  * - TXT：fetch → 文本，展示前 200KB，剩余提示下载获取完整内容
  * 弹窗风格对齐 SideBar 中的 gf-dialog，主题变量来自 assets/theme.css。
  */
 import { computed, ref, watch, onUnmounted, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
+import PptxSlide from './PptxSlide.vue'
+import { parsePptx, type PptxDeck } from './pptx'
 
 interface PreviewFile {
   url: string
@@ -38,10 +41,11 @@ const errorMsg = ref('')
 const textContent = ref('')
 const textTruncated = ref(false)
 
-/* -------- PPT 图片轮播 -------- */
-const pptPages = ref<string[]>([])
+/* -------- PPT 分页渲染 -------- */
+const deck = ref<PptxDeck | null>(null)
 const currentPage = ref(0)
-const scale = ref(1)
+/** 用户主动缩放倍数，1 表示适应窗口 */
+const zoom = ref(1)
 const translateX = ref(0)
 const translateY = ref(0)
 const isDragging = ref(false)
@@ -49,6 +53,12 @@ let dragStartX = 0
 let dragStartY = 0
 let dragStartTx = 0
 let dragStartTy = 0
+
+/** 舞台可用尺寸，用来把原始画布等比缩到容器内 */
+const stageRef = ref<HTMLElement | null>(null)
+const stageW = ref(0)
+const stageH = ref(0)
+let stageObserver: ResizeObserver | null = null
 
 /* -------- refs -------- */
 const dialogRef = ref<HTMLElement | null>(null)
@@ -75,13 +85,30 @@ const resolvedType = computed<'ppt' | 'txt' | ''>(() => {
   return ''
 })
 
-const totalPages = computed(() => pptPages.value.length)
-const currentPageUrl = computed(() => pptPages.value[currentPage.value] || '')
+const slides = computed(() => deck.value?.slides ?? [])
+const totalPages = computed(() => slides.value.length)
+const currentSlide = computed(() => slides.value[currentPage.value] ?? null)
 
-const imageStyle = computed(() => ({
-  transform: `translate(${translateX.value}px, ${translateY.value}px) scale(${scale.value})`,
+const deckWidth = computed(() => deck.value?.width || 960)
+const deckHeight = computed(() => deck.value?.height || 540)
+
+/** 适应容器的基准缩放；用户缩放在此之上叠乘 */
+const fitRatio = computed(() => {
+  if (!stageW.value || !stageH.value) return 1
+  const pad = 32
+  return Math.min(
+    (stageW.value - pad) / deckWidth.value,
+    (stageH.value - pad) / deckHeight.value,
+  )
+})
+
+/** 缩略图缩放比例：缩略图栏内容宽度约 136px */
+const thumbRatio = computed(() => 136 / deckWidth.value)
+
+const stageStyle = computed(() => ({
+  transform: `translate(${translateX.value}px, ${translateY.value}px) scale(${fitRatio.value * zoom.value})`,
   transition: isDragging.value ? 'none' : 'transform 0.18s ease',
-  cursor: scale.value > 1 ? (isDragging.value ? 'grabbing' : 'grab') : 'default',
+  cursor: zoom.value > 1 ? (isDragging.value ? 'grabbing' : 'grab') : 'default',
 }))
 
 function fileNameFromUrl(url: string): string {
@@ -141,35 +168,57 @@ async function loadText() {
 
 /* --------------------------- PPT --------------------------- */
 
-async function loadPptPages() {
+/** 20MB 以上的 pptx 在浏览器里解析会明显卡顿，直接劝下载 */
+const PPT_PARSE_LIMIT = 20 * 1024 * 1024
+
+async function loadPptx() {
   if (!props.file?.url) return
+  const name = (props.file.name || props.file.url).toLowerCase()
+  // 老的二进制 .ppt 不是 zip 包，前端解析不了
+  if (name.endsWith('.ppt') && !name.endsWith('.pptx')) {
+    errorMsg.value = '旧版 .ppt 格式无法在线预览，请下载后查看或转存为 .pptx'
+    return
+  }
+
   loading.value = true
   errorMsg.value = ''
-  pptPages.value = []
+  disposeDeck()
   currentPage.value = 0
   resetTransform()
   try {
-    const res = await fetch(
-      `/api/ppt/pages?url=${encodeURIComponent(props.file.url)}`,
-    )
+    const res = await fetch(proxyUrl(props.file.url))
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const body = (await res.json()) as {
-      code: number
-      message: string
-      data: { pages: string[]; total: number } | null
+    const buf = await res.arrayBuffer()
+    if (buf.byteLength > PPT_PARSE_LIMIT) {
+      throw new Error('文件超过 20MB，请下载后查看')
     }
-    if (body.code !== 0 || !body.data) {
-      throw new Error(body.message || '预览生成失败')
-    }
-    pptPages.value = body.data.pages || []
-    if (pptPages.value.length === 0) {
-      throw new Error('未拿到任何页面')
-    }
+    deck.value = await parsePptx(buf)
+    if (totalPages.value === 0) throw new Error('未解析出任何页面')
   } catch (e) {
     errorMsg.value = (e as Error).message || '加载失败'
   } finally {
     loading.value = false
   }
+}
+
+function disposeDeck() {
+  deck.value?.dispose()
+  deck.value = null
+}
+
+function observeStage() {
+  nextTick(() => {
+    const el = stageRef.value
+    if (!el) return
+    stageObserver?.disconnect()
+    stageObserver = new ResizeObserver(() => {
+      stageW.value = el.clientWidth
+      stageH.value = el.clientHeight
+    })
+    stageObserver.observe(el)
+    stageW.value = el.clientWidth
+    stageH.value = el.clientHeight
+  })
 }
 
 function goToPage(idx: number) {
@@ -194,12 +243,12 @@ function handleNext() {
 }
 
 function zoomIn() {
-  scale.value = Math.min(scale.value + 0.2, 5)
+  zoom.value = Math.min(zoom.value + 0.2, 5)
 }
 
 function zoomOut() {
-  const next = Math.max(scale.value - 0.2, 0.4)
-  scale.value = next
+  const next = Math.max(zoom.value - 0.2, 0.4)
+  zoom.value = next
   if (next <= 1) {
     translateX.value = 0
     translateY.value = 0
@@ -207,13 +256,11 @@ function zoomOut() {
 }
 
 function fitScale() {
-  scale.value = 1
-  translateX.value = 0
-  translateY.value = 0
+  resetTransform()
 }
 
 function resetTransform() {
-  scale.value = 1
+  zoom.value = 1
   translateX.value = 0
   translateY.value = 0
 }
@@ -227,7 +274,7 @@ function handleWheel(e: WheelEvent) {
 
 function handleMouseDown(e: MouseEvent) {
   if (resolvedType.value !== 'ppt') return
-  if (scale.value <= 1) return
+  if (zoom.value <= 1) return
   if (e.button !== 0) return
   e.preventDefault()
   isDragging.value = true
@@ -330,7 +377,10 @@ watch(
       document.addEventListener('keydown', handleKeyDown)
       document.addEventListener('fullscreenchange', onFullscreenChange)
       if (resolvedType.value === 'txt') loadText()
-      else if (resolvedType.value === 'ppt') loadPptPages()
+      else if (resolvedType.value === 'ppt') {
+        loadPptx()
+        observeStage()
+      }
     } else {
       document.body.style.overflow = ''
       document.removeEventListener('keydown', handleKeyDown)
@@ -342,17 +392,26 @@ watch(
       textContent.value = ''
       errorMsg.value = ''
       textTruncated.value = false
-      pptPages.value = []
+      stageObserver?.disconnect()
+      stageObserver = null
+      disposeDeck()
       currentPage.value = 0
       resetTransform()
     }
   },
 )
 
+// 加载完成后 v-else 分支才挂上 stage 节点，这时才能观测到真实尺寸
+watch(loading, (v) => {
+  if (!v && resolvedType.value === 'ppt' && deck.value) observeStage()
+})
+
 onUnmounted(() => {
   document.body.style.overflow = ''
   document.removeEventListener('keydown', handleKeyDown)
   document.removeEventListener('fullscreenchange', onFullscreenChange)
+  stageObserver?.disconnect()
+  disposeDeck()
 })
 </script>
 
@@ -400,29 +459,40 @@ onUnmounted(() => {
             <template v-if="resolvedType === 'ppt'">
               <div v-if="loading" class="fp-center fp-loading">
                 <span class="fp-spinner" />
-                <span>正在生成预览，PPT 首次预览较慢，请稍候…</span>
+                <span>正在解析 PPT，请稍候…</span>
               </div>
               <div v-else-if="errorMsg" class="fp-center fp-empty-error">
                 <div>预览失败：{{ errorMsg }}</div>
-                <button class="gf-btn gf-btn-plain fp-retry" @click="loadPptPages">重试</button>
+                <button class="gf-btn gf-btn-plain fp-retry" @click="loadPptx">重试</button>
               </div>
               <div v-else class="fp-ppt-layout">
                 <!-- 缩略图 -->
                 <div class="fp-thumbs">
                   <div
-                    v-for="(u, i) in pptPages"
+                    v-for="(s, i) in slides"
                     :key="i"
                     class="fp-thumb"
                     :class="{ active: i === currentPage }"
                     :data-idx="i"
                     @click="goToPage(i)"
                   >
-                    <img :src="u" alt="" draggable="false" />
+                    <div
+                      class="fp-thumb-canvas"
+                      :style="{ height: `${deckHeight * thumbRatio}px` }"
+                    >
+                      <PptxSlide
+                        :slide="s"
+                        :width="deckWidth"
+                        :height="deckHeight"
+                        :style="{ transform: `scale(${thumbRatio})` }"
+                      />
+                    </div>
                     <span class="fp-thumb-num">{{ i + 1 }}</span>
                   </div>
                 </div>
                 <!-- 主视图 -->
                 <div
+                  ref="stageRef"
                   class="fp-stage"
                   @wheel.prevent="handleWheel"
                   @mousedown="handleMouseDown"
@@ -449,16 +519,14 @@ onUnmounted(() => {
                       <path d="M6 3l5 5-5 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
                     </svg>
                   </button>
-                  <div class="fp-stage-inner">
-                    <img
-                      v-if="currentPageUrl"
-                      :src="currentPageUrl"
-                      class="fp-page-img"
-                      :style="imageStyle"
-                      alt=""
-                      draggable="false"
-                    />
-                  </div>
+                  <PptxSlide
+                    v-if="currentSlide"
+                    :slide="currentSlide"
+                    :width="deckWidth"
+                    :height="deckHeight"
+                    class="fp-page-canvas"
+                    :style="stageStyle"
+                  />
                 </div>
               </div>
             </template>
@@ -482,14 +550,14 @@ onUnmounted(() => {
 
           <div class="fp-dialog-footer">
             <!-- PPT：左侧提供缩放控件 -->
-            <div v-if="resolvedType === 'ppt' && pptPages.length > 0" class="fp-toolbar-left">
+            <div v-if="resolvedType === 'ppt' && totalPages > 0" class="fp-toolbar-left">
               <button class="fp-icon-btn" title="缩小 (-)" @click="zoomOut">
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
                   <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.4"/>
                   <path d="M11 11l3 3M5 7h4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
                 </svg>
               </button>
-              <span class="fp-zoom-label">{{ Math.round(scale * 100) }}%</span>
+              <span class="fp-zoom-label">{{ Math.round(zoom * 100) }}%</span>
               <button class="fp-icon-btn" title="放大 (+)" @click="zoomIn">
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
                   <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.4"/>
@@ -655,12 +723,17 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
-.fp-thumb img {
+.fp-thumb-canvas {
   width: 100%;
-  display: block;
-  aspect-ratio: 16 / 9;
-  object-fit: contain;
+  overflow: hidden;
   background: #fff;
+  /* 子元素是原始尺寸画布，靠 scale 缩小后用 transform-origin 顶到左上角 */
+  position: relative;
+}
+
+.fp-thumb-canvas > :deep(.pptx-slide) {
+  transform-origin: top left;
+  pointer-events: none;
 }
 
 .fp-thumb:hover {
@@ -694,23 +767,10 @@ onUnmounted(() => {
   justify-content: center;
 }
 
-.fp-stage-inner {
-  width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
-}
-
-.fp-page-img {
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
+.fp-page-canvas {
+  /* 缩放围绕中心，配合 fitRatio 让页面居中显示 */
+  transform-origin: center center;
   user-select: none;
-  pointer-events: none;
-  display: block;
-  background: #fff;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
 }
 

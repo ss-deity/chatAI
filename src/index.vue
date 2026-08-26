@@ -15,7 +15,7 @@ import FileGrid from './components/FileGrid/index.vue'
 import TransferPanel from './components/TransferPanel/index.vue'
 import { useTransferTasks } from './composables/useTransferTasks'
 import { DEFAULT_MODEL_TYPE, getModel } from './config/models'
-import { fetchSSE, cancelSSE } from './utils/sse'
+import { fetchSSE, cancelSSE, describeSSEError } from './utils/sse'
 import {
   MODEL_UPLOAD_CONFIG,
   checkFileFormat,
@@ -73,6 +73,11 @@ interface Message {
   attachments?: RemoteAttachment[]
   /** 本条回复触发的工具调用及其状态，渲染在正文上方 */
   toolCalls?: ToolCall[]
+  /**
+   * 本条回复失败时的错误提示（余额不足 / 限流 / 鉴权失败 / 连接中断等）。
+   * 与 content 并存：已经流出来的部分内容照常展示，下方再挂一条错误条。
+   */
+  error?: string
 }
 
 interface ChatConversation {
@@ -117,7 +122,7 @@ const inputRef = ref<HTMLElement | null>(null)
 const activeChatId = ref('')
 const conversations = ref<ChatConversation[]>([])
 
-/** 当前选中的模型 type（默认 DeepSeek-V4），发送会话时随请求带给后端 */
+/** 当前选中的模型 type（默认 openApi），发送会话时随请求带给后端 */
 const selectedModel = ref(DEFAULT_MODEL_TYPE)
 
 /** 深度思考（reasoning）开关，默认关闭；只有支持的模型（如 DeepSeek）显示按钮 */
@@ -1417,6 +1422,18 @@ function handleSubmit() {
     requestBody.skills = skillIds
   }
 
+  startChatStream(key, text, requestBody)
+}
+
+/**
+ * 发起一次 SSE 生成，并把增量/结束/错误回写到对应会话。
+ * 由 handleSubmit 与 handleRetry 共用（重试就是拿同样的 requestBody 再跑一遍）。
+ */
+function startChatStream(
+  key: string,
+  text: string,
+  requestBody: Record<string, unknown>,
+) {
   // 用闭包变量跟踪当前会话 key，收到真实 conversationId 时会重命名
   let currentKey = key
 
@@ -1514,12 +1531,19 @@ function handleSubmit() {
     },
     onError(error) {
       const s = sessionStates[currentKey]
+      const tip = describeSSEError(error)
       if (s) {
         const idx = s.assistantIndex
         if (idx >= 0 && idx < s.messages.length) {
+          // 保留已经流出来的内容，把错误单独挂在这条回复上，
+          // 让用户既能看到半截答案，也能明确知道"是失败了"而不是"回答完了"。
           s.messages[idx] = {
             ...s.messages[idx],
-            content: '请求失败: ' + error.message,
+            error: tip,
+            // 把仍在 running 的工具调用标成失败，避免一直转圈
+            toolCalls: s.messages[idx].toolCalls?.map((t) =>
+              t.status === 'running' ? { ...t, status: 'failed' } : t,
+            ),
           }
         }
         s.loading = false
@@ -1528,11 +1552,72 @@ function handleSubmit() {
         s.assistantIndex = -1
       }
       sessionControllers.delete(currentKey)
+      // 用户可能已经切到别的会话，出错的那条也要能被感知到
+      if (activeChatId.value === currentKey) {
+        ElMessage.error(tip)
+        scrollToBottom()
+      } else {
+        ElMessage.error(`有一个会话生成失败：${tip}`)
+      }
       void loadConversations()
     },
   })
 
   sessionControllers.set(key, controller)
+}
+
+/**
+ * 失败的回复是否可以重试：必须是最后一条 assistant 消息、带 error、且它前面有一条用户消息。
+ * 只允许重试最后一条，避免历史中间某条重试后与后续上下文错位。
+ */
+function canRetry(idx: number): boolean {
+  const list = messages.value
+  if (idx !== list.length - 1) return false
+  const msg = list[idx]
+  if (!msg || msg.role !== 'assistant' || !msg.error) return false
+  return idx > 0 && list[idx - 1]?.role === 'user'
+}
+
+/**
+ * 重试：丢掉失败的这条 assistant 回复，用它前面那条用户消息重新发起请求。
+ * 用户消息本身保留在界面上（后端已落库，不重复发送用户消息文本以外的东西）。
+ */
+function handleRetry(idx: number) {
+  const key = activeChatId.value
+  if (!key) return
+  const state = sessionStates[key]
+  if (!state || state.loading) return
+  if (!canRetry(idx)) return
+
+  const userMsg = state.messages[idx - 1]
+  const text = userMsg.content
+  const attachments = userMsg.attachments ?? []
+
+  // 清空失败回复的内容，复用同一条气泡承载新的生成结果
+  state.messages[idx] = { role: 'assistant', content: '' }
+  state.assistantIndex = idx
+  state.loading = true
+  state.paused = false
+  state.startedAt = Date.now()
+  stickToBottom.value = true
+  scrollToBottom(true)
+
+  const requestBody: Record<string, unknown> = { message: text }
+  if (!key.startsWith('pending_')) {
+    requestBody.conversationId = Number(key)
+  }
+  if (currentUser.value?.id) {
+    requestBody.userId = Number(currentUser.value.id)
+  }
+  requestBody.model = selectedModel.value
+  if (deepThinking.value && supportsThinking.value) {
+    requestBody.thinking = true
+  }
+  if (attachments.length) {
+    requestBody.attachments = attachments
+  }
+
+  startChatStream(key, text, requestBody)
 }
 
 function handlePause() {
@@ -1718,6 +1803,20 @@ watch(
                   :images="msg.images"
                   :user-id="currentUser?.id"
                 />
+                <!-- 生成失败提示：与已流出的内容并存，明确区分「回答完了」和「中断了」 -->
+                <div v-if="msg.error" class="message-error">
+                  <svg class="message-error__icon" viewBox="0 0 16 16" fill="none">
+                    <circle cx="8" cy="8" r="6.6" stroke="currentColor" stroke-width="1.4"/>
+                    <path d="M8 4.8v4M8 10.9v.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                  </svg>
+                  <span class="message-error__text">{{ msg.error }}</span>
+                  <button
+                    v-if="canRetry(idx)"
+                    class="message-error__retry"
+                    :disabled="loading"
+                    @click="handleRetry(idx)"
+                  >重试</button>
+                </div>
               </div>
               <template v-else>
                 <div class="user-content-col">
@@ -2183,6 +2282,57 @@ html, body, #app {
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* 生成失败提示条：挂在 assistant 气泡内容下方 */
+.message-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--gf-danger-bg);
+  border: 1px solid var(--gf-danger-border);
+  color: var(--gf-danger);
+  font-size: 13px;
+  line-height: 20px;
+  white-space: normal;
+}
+
+.message-error__icon {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+}
+
+.message-error__text {
+  flex: 1;
+  min-width: 0;
+}
+
+.message-error__retry {
+  flex: none;
+  height: 26px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--gf-danger);
+  background: transparent;
+  color: var(--gf-danger);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, opacity 0.15s;
+}
+
+.message-error__retry:hover:not(:disabled) {
+  background: var(--gf-danger);
+  color: #fff;
+}
+
+.message-error__retry:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* 用户气泡：几何与配色对齐 enterprise-genclaw 的 .wp-genflow-user-text-message__text
