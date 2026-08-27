@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch, h, render, getCurrentInstance } from 'vue'
+import { ref, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch, h, render, getCurrentInstance, defineAsyncComponent } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { marked } from 'marked'
@@ -44,6 +44,15 @@ import { fetchMentionImages, type MentionFile } from './utils/mentionFiles'
 import SkillPanel from './components/SkillPanel/index.vue'
 import ToolCallInfo, { type ToolCall } from './components/ToolCallInfo/index.vue'
 import ChatEcharts, { type ChartArtifact } from './components/ChatEcharts/index.vue'
+import type { FlowchartArtifact } from './components/ChatFlowchart/index.vue'
+
+/**
+ * 流程图卡片：G6 打进主包会多出 ~500KB，而流程图是低频产物，
+ * 按 FilePreview 的做法用 defineAsyncComponent，真出现流程图时再加载。
+ */
+const ChatFlowchart = defineAsyncComponent(
+  () => import('./components/ChatFlowchart/index.vue'),
+)
 import ChatLoading from './components/ChatLoading/index.vue'
 import FilePreview from './components/FilePreview/index.vue'
 import { fetchSkills, type Skill } from './utils/skills'
@@ -76,6 +85,8 @@ interface Message {
   toolCalls?: ToolCall[]
   /** 本条回复产出的 ECharts 图表（如 Excel 转图表），渲染在正文下方 */
   charts?: ChartArtifact[]
+  /** 本条回复产出的流程图（generate_flowchart），渲染在正文下方 */
+  flowcharts?: FlowchartArtifact[]
   /**
    * 本条回复失败时的错误提示（余额不足 / 限流 / 鉴权失败 / 连接中断等）。
    * 与 content 并存：已经流出来的部分内容照常展示，下方再挂一条错误条。
@@ -1232,7 +1243,7 @@ function waitingLabel(msg: Message): string {
     : '正在思考'
 }
 
-function normalizeMessages(rawMessages: Array<{ role: string; content: string; images?: string[]; attachments?: RemoteAttachment[]; toolCalls?: ToolCall[]; charts?: ChartArtifact[] }> | undefined): Message[] {
+function normalizeMessages(rawMessages: Array<{ role: string; content: string; images?: string[]; attachments?: RemoteAttachment[]; toolCalls?: ToolCall[]; charts?: ChartArtifact[]; flowcharts?: FlowchartArtifact[] }> | undefined): Message[] {
   return (rawMessages ?? []).map((item) => ({
     role: item.role === 'assistant' ? 'assistant' : 'user',
     content: item.content ?? '',
@@ -1240,6 +1251,7 @@ function normalizeMessages(rawMessages: Array<{ role: string; content: string; i
     attachments: item.attachments && item.attachments.length ? item.attachments : undefined,
     toolCalls: item.toolCalls && item.toolCalls.length ? item.toolCalls : undefined,
     charts: item.charts && item.charts.length ? item.charts : undefined,
+    flowcharts: item.flowcharts && item.flowcharts.length ? item.flowcharts : undefined,
   }))
 }
 
@@ -1525,6 +1537,19 @@ function startChatStream(
           s.messages[idx] = {
             ...s.messages[idx],
             charts: [...(s.messages[idx].charts ?? []), ...charts],
+          }
+          if (activeChatId.value === currentKey) scrollToBottom()
+        }
+      }
+      // 流程图增量：只有节点与连线，布局由 ChatFlowchart 里的 G6 现算
+      const flowcharts = (payload.choices as Array<{ delta?: { flowcharts?: FlowchartArtifact[] } }> | undefined)?.[0]?.delta?.flowcharts
+      if (flowcharts && flowcharts.length) {
+        const s = sessionStates[currentKey]
+        const idx = s?.assistantIndex ?? -1
+        if (s && idx >= 0 && idx < s.messages.length) {
+          s.messages[idx] = {
+            ...s.messages[idx],
+            flowcharts: [...(s.messages[idx].flowcharts ?? []), ...flowcharts],
           }
           if (activeChatId.value === currentKey) scrollToBottom()
         }
@@ -1817,7 +1842,10 @@ watch(
               <div
                 v-if="msg.role === 'assistant'"
                 class="message-bubble markdown-body"
-                :class="{ 'has-charts': msg.charts && msg.charts.length }"
+                :class="{
+                  'has-charts':
+                    (msg.charts && msg.charts.length) || (msg.flowcharts && msg.flowcharts.length),
+                }"
               >
                 <ToolCallInfo v-if="msg.toolCalls && msg.toolCalls.length" :tools="msg.toolCalls" />
                 <div v-if="msg.content" v-html="renderMarkdown(msg.content)"></div>
@@ -1836,6 +1864,12 @@ watch(
                   v-for="chart in msg.charts ?? []"
                   :key="chart.id"
                   :chart="chart"
+                />
+                <!-- generate_flowchart 产出的流程图：服务端只给结构，布局在前端算 -->
+                <ChatFlowchart
+                  v-for="flowchart in msg.flowcharts ?? []"
+                  :key="flowchart.id"
+                  :flowchart="flowchart"
                 />
                 <!-- 生成失败提示：与已流出的内容并存，明确区分「回答完了」和「中断了」 -->
                 <div v-if="msg.error" class="message-error">

@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@antv/g6": "5.1.1",
     "@lucky-office/excel": "0.3.2",
     "ant-design-vue": "4.2.6",
     "browser-image-compression": "^2.0.2",
