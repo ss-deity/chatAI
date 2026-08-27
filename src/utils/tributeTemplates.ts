@@ -23,14 +23,17 @@ function formatSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
-/** 单个候选项：缩略图 + 文件名 + 目录/大小 */
+/** 单个候选项：图片给缩略图，文档给扩展名角标 + 文件名 + 目录/大小 */
 export function menuItemTemplate(item: { original: MentionFile }): string {
   const f = item.original
   const meta = [f.dir ? `/${f.dir}` : '根目录', formatSize(f.size)]
     .filter(Boolean)
     .join(' · ')
+  const preview = f.type.startsWith('image/')
+    ? `<img class="chat-mention__thumb" src="${escapeHtml(f.url)}" alt="" />`
+    : `<span class="chat-mention__ext">${escapeHtml(f.ext.slice(0, 4).toUpperCase() || 'FILE')}</span>`
   return `<div class="chat-mention__item">
-      <img class="chat-mention__thumb" src="${escapeHtml(f.url)}" alt="" />
+      ${preview}
       <div class="chat-mention__detail">
         <span class="chat-mention__name">${escapeHtml(f.name)}</span>
         <span class="chat-mention__meta">${escapeHtml(meta)}</span>
@@ -40,7 +43,7 @@ export function menuItemTemplate(item: { original: MentionFile }): string {
 
 /** 无匹配结果 */
 export function noMatchTemplate(): string {
-  return `<div class="chat-mention__empty">未找到相关图片</div>`
+  return `<div class="chat-mention__empty">未找到相关文件</div>`
 }
 
 /** 异步加载中 */

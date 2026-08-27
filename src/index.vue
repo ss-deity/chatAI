@@ -25,6 +25,7 @@ import {
   uploadToServer,
   nextAttachmentUid,
   isImageMime,
+  extensionsOfFileType,
   type Attachment,
   type RemoteAttachment,
   type UploadConfig,
@@ -40,7 +41,7 @@ import {
 } from './components/AutoTask/inputTemplates'
 import { selectedAutoTaskKey, clearAutoTaskSelection } from './composables/useAutoTask'
 import { autoTaskMap } from './components/AutoTask/const'
-import { fetchMentionImages, type MentionFile } from './utils/mentionFiles'
+import { fetchMentionFiles, type MentionFile } from './utils/mentionFiles'
 import SkillPanel from './components/SkillPanel/index.vue'
 import ToolCallInfo, { type ToolCall } from './components/ToolCallInfo/index.vue'
 import ChatEcharts, { type ChartArtifact } from './components/ChatEcharts/index.vue'
@@ -55,7 +56,12 @@ const ChatFlowchart = defineAsyncComponent(
 )
 import ChatLoading from './components/ChatLoading/index.vue'
 import FilePreview from './components/FilePreview/index.vue'
-import { fetchSkills, type Skill } from './utils/skills'
+import {
+  fetchSkills,
+  splitSkillSegments,
+  type Skill,
+  type SkillSegment,
+} from './utils/skills'
 import {
   menuItemTemplate,
   noMatchTemplate,
@@ -320,7 +326,7 @@ function toAttachmentDisplay(list: RemoteAttachment[]): Attachment[] {
   }))
 }
 
-/* ---------- 输入框 @ 唤起文件管理图片（tribute 插件） ---------- */
+/* ---------- 输入框 @ 唤起文件管理里的文件（tribute 插件） ---------- */
 
 /**
  * @ 选进来的附件：uid -> 输入框里对应 chip 的 data-mention-url。
@@ -332,13 +338,15 @@ const mentionTokens = new Map<string, string>()
 let tribute: Tribute<MentionFile> | null = null
 
 /**
- * @ 是否可用：文本模型现在也能通过 generate_image 工具改图/以图生图，
- * 所以只要当前模型允许带图片附件就挂载 tribute；不允许上传时 @ 就是普通字符。
+ * @ 是否可用：图片、文本、表格、PPT/Word 等附件都能从文件管理里引用，
+ * 所以只要当前模型允许带附件就挂载 tribute；不允许上传时 @ 就是普通字符。
  */
-const mentionEnabled = computed(() => {
-  const cfg = uploadConfig.value
-  return !!cfg && cfg.fileType.includes('image/')
-})
+const mentionEnabled = computed(() => !!uploadConfig.value)
+
+/** @ 面板只列当前模型能接收的扩展名，避免选进来又提示格式不支持 */
+const mentionExts = computed(() =>
+  uploadConfig.value ? extensionsOfFileType(uploadConfig.value.fileType) : [],
+)
 
 /** values 回调防抖，避免每敲一个字都打一次接口 */
 let mentionTimer: ReturnType<typeof setTimeout> | null = null
@@ -347,14 +355,14 @@ function loadMentionValues(keyword: string, cb: (list: MentionFile[]) => void) {
   mentionTimer = setTimeout(() => {
     const userId = currentUser.value?.id
     if (!userId) return cb([])
-    fetchMentionImages(userId, keyword)
+    fetchMentionFiles(userId, keyword, mentionExts.value)
       .then(cb)
       .catch(() => cb([]))
   }, 200)
 }
 
 /**
- * @ 选中一张图片：文件已在 BOS 上，直接按"上传成功"的附件加入待发送列表，
+ * @ 选中一个文件：文件已在 BOS 上，直接按"上传成功"的附件加入待发送列表，
  * 无需再走一次上传。
  */
 function handleMentionReplaced(e: Event) {
@@ -382,7 +390,8 @@ function handleMentionReplaced(e: Event) {
     name: file.name,
     type: file.type,
     size: file.size,
-    thumbnail: file.url,
+    // 非图片没有缩略图，FileGrid 会退回按类型展示图标
+    thumbnail: isImageMime(file.type) ? file.url : '',
     url: file.url,
     status: 'success',
   })
@@ -494,6 +503,11 @@ const skills = ref<Skill[]>([])
 const showSkillPanel = ref(false)
 /** `/` 之后已输入的关键字 */
 const skillKeyword = ref('')
+/**
+ * 本次唤起面板的 `/` 所在文本节点与下标。
+ * 输入框里可能同时存在多个 `/`，选中技能时只替换这一个，不能按「最后一个 `/`」找。
+ */
+let skillTrigger: { node: Text; offset: number } | null = null
 const skillPanelRef = ref<InstanceType<typeof SkillPanel> | null>(null)
 
 function loadSkills() {
@@ -509,34 +523,45 @@ function loadSkills() {
 function closeSkillPanel() {
   showSkillPanel.value = false
   skillKeyword.value = ''
+  skillTrigger = null
 }
 
 /**
- * 按光标位置决定面板显隐与关键字：
- * 光标所在文本节点里，最后一个 `/` 到光标之间不含空白时视为正在唤起技能。
+ * 从当前光标位置解析正在唤起技能的 `/`：
+ * 光标所在文本节点里，最后一个 `/` 必须位于行首或空白之后（避免 `a/b`、`http://` 误唤起），
+ * 且 `/` 到光标之间不含空白。
+ */
+function resolveSlashTrigger(
+  host: HTMLElement,
+): { node: Text; offset: number; keyword: string } | null {
+  const sel = window.getSelection()
+  if (!sel || sel.rangeCount === 0) return null
+  const anchor = sel.anchorNode
+  if (!anchor || anchor.nodeType !== Node.TEXT_NODE || !host.contains(anchor)) {
+    return null
+  }
+  const before = (anchor as Text).data.slice(0, sel.getRangeAt(0).startOffset)
+  const slashIdx = before.lastIndexOf('/')
+  if (slashIdx < 0) return null
+  if (slashIdx > 0 && !/[\s\u00A0]/.test(before[slashIdx - 1])) return null
+  const keyword = before.slice(slashIdx + 1)
+  if (/[\s\u00A0]/.test(keyword)) return null
+  return { node: anchor as Text, offset: slashIdx, keyword }
+}
+
+/**
+ * 按光标位置决定面板显隐与关键字，并记下本次唤起的 `/` 位置，
+ * 供选中技能时精确替换（输入框里可能还有别的 `/`）。
  */
 function syncSkillPanelWithCursor() {
   const host = inputRef.value
   if (!host || !skills.value.length) return closeSkillPanel()
 
-  const sel = window.getSelection()
-  if (!sel || sel.rangeCount === 0) return closeSkillPanel()
-  const anchor = sel.anchorNode
-  if (!anchor || anchor.nodeType !== Node.TEXT_NODE || !host.contains(anchor)) {
-    return closeSkillPanel()
-  }
+  const trigger = resolveSlashTrigger(host)
+  if (!trigger) return closeSkillPanel()
 
-  const before = (anchor as Text).data.slice(0, sel.getRangeAt(0).startOffset)
-  const slashIdx = before.lastIndexOf('/')
-  if (slashIdx < 0) return closeSkillPanel()
-  // `/` 必须位于行首或空白之后，避免 `a/b`、`http://` 这类内容误唤起
-  if (slashIdx > 0 && !/[\s\u00A0]/.test(before[slashIdx - 1])) {
-    return closeSkillPanel()
-  }
-  const afterSlash = before.slice(slashIdx + 1)
-  if (/[\s\u00A0]/.test(afterSlash)) return closeSkillPanel()
-
-  skillKeyword.value = afterSlash
+  skillTrigger = { node: trigger.node, offset: trigger.offset }
+  skillKeyword.value = trigger.keyword
   showSkillPanel.value = true
 }
 
@@ -572,31 +597,22 @@ function handleInputAreaKeyDown(e: KeyboardEvent) {
  * - `data-text-val`：buildFullMessage 提取文本时取它，模型侧看到的是 `/command`
  */
 function handleSkillSelect(skill: Skill) {
+  const remembered = skillTrigger
   closeSkillPanel()
   const host = inputRef.value
   if (!host) return
   host.focus()
 
-  // 找到最后一个包含 `/` 的普通文本节点（跳过已有 chip 内部的文本）
-  const walker = document.createTreeWalker(host, NodeFilter.SHOW_TEXT, {
-    acceptNode(node) {
-      const parent = (node as Text).parentElement
-      return parent?.getAttribute('contenteditable') === 'false'
-        ? NodeFilter.FILTER_REJECT
-        : NodeFilter.FILTER_ACCEPT
-    },
-  })
-  let triggerNode: Text | null = null
-  let triggerOffset = -1
-  let node: Node | null
-  while ((node = walker.nextNode())) {
-    const idx = (node as Text).data.lastIndexOf('/')
-    if (idx >= 0) {
-      triggerNode = node as Text
-      triggerOffset = idx
-    }
-  }
-  if (!triggerNode || triggerOffset < 0) return
+  // 只替换唤起面板时记下的那个 `/`；节点被浏览器拆分/合并导致失效时，再按当前光标兜底解析
+  const trigger =
+    remembered &&
+    host.contains(remembered.node) &&
+    remembered.node.data[remembered.offset] === '/'
+      ? remembered
+      : resolveSlashTrigger(host)
+  if (!trigger) return
+  const triggerNode = trigger.node
+  const triggerOffset = trigger.offset
 
   // `/keyword` 的结束位置：遇到空白或行尾为止
   const after = triggerNode.data.slice(triggerOffset + 1)
@@ -642,40 +658,9 @@ const skillCommandMap = computed(() => {
   return map
 })
 
-/** 用户消息拆出来的片段：普通文本 / 技能 tag */
-type UserSegment = { type: 'text'; value: string } | { type: 'skill'; name: string }
-
-/**
- * 把用户消息文本拆成「普通文本 + 技能 tag」。
- * 输入框里的 chip 提交时序列化成 `/command`（见 buildFullMessage），
- * 这里按已加载的技能列表反查，使上屏样式与输入框里的 tag 完全一致。
- * 触发规则与 syncSkillPanelWithCursor 保持一致：`/` 必须在行首或空白之后。
- */
-function splitUserContent(content: string): UserSegment[] {
-  const map = skillCommandMap.value
-  if (!content || map.size === 0) return content ? [{ type: 'text', value: content }] : []
-  const segs: UserSegment[] = []
-  let buf = ''
-  let i = 0
-  while (i < content.length) {
-    if (content[i] === '/' && (i === 0 || /[\s\u00A0]/.test(content[i - 1]))) {
-      const cmd = /^[\w-]+/.exec(content.slice(i + 1))?.[0]
-      const name = cmd ? map.get(cmd) : undefined
-      if (cmd && name) {
-        if (buf) {
-          segs.push({ type: 'text', value: buf })
-          buf = ''
-        }
-        segs.push({ type: 'skill', name })
-        i += 1 + cmd.length
-        continue
-      }
-    }
-    buf += content[i]
-    i += 1
-  }
-  if (buf) segs.push({ type: 'text', value: buf })
-  return segs
+/** 用户消息拆出来的片段：普通文本 / 技能 tag（拆分逻辑与侧边栏会话标题共用） */
+function splitUserContent(content: string): SkillSegment[] {
+  return splitSkillSegments(content, skillCommandMap.value)
 }
 
 /** 当前输入框里生效的技能 id（按 chip 出现顺序，去重） */
@@ -1802,6 +1787,7 @@ watch(
       :conversations="conversations"
       :user="currentUser"
       :active-view="route.name === 'files' ? 'files' : 'chat'"
+      :skill-names="skillCommandMap"
       @new-chat="handleNewChat"
       @select="handleSelectChat"
       @delete="handleDeleteChat"
@@ -1942,7 +1928,7 @@ watch(
               v-model="inputText"
               bare
               class="chat-input"
-              :placeholder="mentionEnabled ? '描述您的问题，输入 / 选择技能，@ 选择图片' : '描述您的问题，输入 / 选择技能'"
+              :placeholder="mentionEnabled ? '描述您的问题，输入 / 选择技能，@ 选择文件' : '描述您的问题，输入 / 选择技能'"
               :exclude-events="['shift-enter', 'ctrl-enter']"
               inline-element-vertical-align="middle"
               @submit="handleSubmit"
@@ -2151,6 +2137,21 @@ html, body, #app {
   background: var(--gf-bg-elevated);
 }
 
+/* 非图片文件用扩展名角标代替缩略图 */
+.chat-mention__ext {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 4px;
+  background: var(--gf-bg-elevated);
+  color: var(--gf-text-tertiary);
+  font-size: 11px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .chat-mention__detail {
   display: flex;
   flex-direction: column;
@@ -2173,9 +2174,20 @@ html, body, #app {
   text-overflow: ellipsis;
 }
 
+/* 空态与加载态：撑到 120px 固定高度，文案垂直水平居中，避免面板缩成一条 */
+.chat-mention__list ul:has(> .chat-mention__empty),
+.chat-mention__list ul:has(> .chat-mention__loading) {
+  padding: 0;
+}
+
 .chat-mention__empty,
 .chat-mention__loading {
+  box-sizing: border-box;
+  min-height: 120px;
   padding: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   text-align: center;
   font-size: 13px;
   color: var(--gf-text-tertiary);

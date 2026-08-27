@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
+import { splitSkillSegments, type SkillSegment } from '../../utils/skills'
 
 interface ChatItem {
   id: string
@@ -21,6 +22,8 @@ const props = defineProps<{
   conversations: ChatItem[]
   user: UserInfo | null
   activeView?: 'chat' | 'files'
+  /** command -> 技能展示名，用于把标题里的 `/command` 渲染成 tag */
+  skillNames?: Map<string, string>
 }>()
 
 const emit = defineEmits<{
@@ -91,6 +94,14 @@ function handleOpenFileManager() {
 
 function handleSelect(id: string) {
   emit('select', id)
+}
+
+/**
+ * 会话标题里的 `/command` 渲染成技能 tag，与消息气泡、输入框里的 chip 视觉一致。
+ * 重命名弹窗仍用原始 name，不受影响。
+ */
+function titleSegments(name: string): SkillSegment[] {
+  return splitSkillSegments(name, props.skillNames)
 }
 
 function toggleFold() {
@@ -257,7 +268,12 @@ function handleSettings() {
             <svg class="history-item-icon" width="15" height="15" viewBox="0 0 16 16" fill="none">
               <path d="M2 4.2A1.7 1.7 0 013.7 2.5h8.6A1.7 1.7 0 0114 4.2v5.1a1.7 1.7 0 01-1.7 1.7H6.6l-3 2.3a.5.5 0 01-.8-.4v-1.9H3.7A1.7 1.7 0 012 9.3V4.2z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
             </svg>
-            <span class="history-item-title">{{ item.name }}</span>
+            <span class="history-item-title" :title="item.name">
+              <template v-for="(seg, segIdx) in titleSegments(item.name)" :key="segIdx">
+                <span v-if="seg.type === 'skill'" class="history-item-skill">{{ seg.name }}</span>
+                <template v-else>{{ seg.value }}</template>
+              </template>
+            </span>
             <button
               class="history-item-more"
               :class="{ visible: activeMenuId === item.id }"
@@ -677,6 +693,20 @@ function handleSettings() {
   min-width: 0;
 }
 
+/* 标题里的技能 tag：配色沿用输入框 chip 的 --gf-tag-*，尺寸压小以适应 40px 的列表项 */
+.history-item-skill {
+  display: inline-block;
+  margin-right: 2px;
+  padding: 0 4px;
+  border: 1px solid var(--gf-tag-border);
+  border-radius: 3px;
+  background: var(--gf-tag-bg);
+  color: var(--gf-tag-text);
+  font-size: 12px;
+  line-height: 18px;
+  vertical-align: 1px;
+}
+
 .history-item-more {
   flex-shrink: 0;
   width: 24px;
@@ -795,8 +825,8 @@ function handleSettings() {
 /* 弹出菜单 */
 .user-menu {
   position: absolute;
-  /* 贴着用户入口上沿弹出，比之前更靠下，不再顶到会话列表里 */
-  bottom: 60px;
+  /* 贴着用户入口上沿弹出，与入口留一点呼吸空间 */
+  bottom: 72px;
   left: 20px;
   width: 180px;
   background: var(--gf-bg-panel);

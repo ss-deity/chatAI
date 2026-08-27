@@ -32,3 +32,49 @@ export async function fetchSkills(): Promise<Skill[]> {
   }
   return json.data
 }
+
+/** 一段文本拆出来的片段：普通文本 / 技能 tag */
+export type SkillSegment =
+  | { type: 'text'; value: string }
+  | { type: 'skill'; name: string }
+
+/**
+ * 把含 `/command` 的文本拆成「普通文本 + 技能 tag」片段。
+ *
+ * 输入框里的技能 chip 提交时序列化成 `/command`（见 index.vue 的 buildFullMessage），
+ * 消息气泡、侧边栏会话标题都据此反查展示名，保证 tag 样式与输入框一致。
+ * 触发规则与 resolveSlashTrigger 一致：`/` 必须在行首或空白之后。
+ *
+ * @param commandToName command -> 展示名；为空时整段按普通文本返回
+ */
+export function splitSkillSegments(
+  content: string,
+  commandToName?: Map<string, string>,
+): SkillSegment[] {
+  if (!content) return []
+  if (!commandToName || commandToName.size === 0) {
+    return [{ type: 'text', value: content }]
+  }
+  const segs: SkillSegment[] = []
+  let buf = ''
+  let i = 0
+  while (i < content.length) {
+    if (content[i] === '/' && (i === 0 || /[\s\u00A0]/.test(content[i - 1]))) {
+      const cmd = /^[\w-]+/.exec(content.slice(i + 1))?.[0]
+      const name = cmd ? commandToName.get(cmd) : undefined
+      if (cmd && name) {
+        if (buf) {
+          segs.push({ type: 'text', value: buf })
+          buf = ''
+        }
+        segs.push({ type: 'skill', name })
+        i += 1 + cmd.length
+        continue
+      }
+    }
+    buf += content[i]
+    i += 1
+  }
+  if (buf) segs.push({ type: 'text', value: buf })
+  return segs
+}
