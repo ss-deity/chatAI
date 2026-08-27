@@ -34,6 +34,7 @@ function isImage(a: Attachment): boolean {
 
 const TEXT_EXT_SET = new Set(['txt', 'md', 'log', 'json', 'csv'])
 const PPT_EXT_SET = new Set(['ppt', 'pptx'])
+const EXCEL_EXT_SET = new Set(['xlsx', 'xls', 'xlsm'])
 
 function extOf(name: string): string {
   const idx = name.lastIndexOf('.')
@@ -49,6 +50,10 @@ function isPptFile(a: Attachment): boolean {
   return PPT_EXT_SET.has(extOf(a.name))
 }
 
+function isExcelFile(a: Attachment): boolean {
+  return EXCEL_EXT_SET.has(extOf(a.name))
+}
+
 /** 缩略图 src：优先本地对象 URL（上传中），完成后用远端 url */
 function thumbSrc(a: Attachment): string {
   return a.thumbnail || a.url || ''
@@ -62,9 +67,13 @@ const previewImages = computed(() =>
   props.files.filter(isImage).map((a) => a.url || a.thumbnail).filter(Boolean) as string[],
 )
 
-/** 文本/PPT 弹窗预览状态 */
+/** 文本/PPT/Excel 弹窗预览状态 */
 const filePreviewVisible = ref(false)
-const filePreviewFile = ref<{ url: string; name?: string; type?: 'ppt' | 'txt' } | null>(null)
+const filePreviewFile = ref<{
+  url: string
+  name?: string
+  type?: 'ppt' | 'excel' | 'txt'
+} | null>(null)
 
 function handleClick(a: Attachment) {
   if (isImage(a)) {
@@ -78,6 +87,11 @@ function handleClick(a: Attachment) {
   if (!a.url) return
   if (isPptFile(a)) {
     filePreviewFile.value = { url: a.url, name: a.name, type: 'ppt' }
+    filePreviewVisible.value = true
+    return
+  }
+  if (isExcelFile(a)) {
+    filePreviewFile.value = { url: a.url, name: a.name, type: 'excel' }
     filePreviewVisible.value = true
     return
   }

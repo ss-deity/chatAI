@@ -21,6 +21,7 @@ const IMAGE_EXT_SET = new Set([
 
 const TEXT_EXT_SET = new Set(['txt', 'md', 'log', 'json', 'csv'])
 const PPT_EXT_SET = new Set(['ppt', 'pptx'])
+const EXCEL_EXT_SET = new Set(['xlsx', 'xls', 'xlsm'])
 
 function isImageFile(entry: { name: string; isDir: boolean; url?: string }): boolean {
   if (entry.isDir || !entry.url) return false
@@ -38,6 +39,12 @@ function isPptFileEntry(entry: { name: string; isDir: boolean; url?: string }): 
   if (entry.isDir || !entry.url) return false
   const ext = entry.name.split('.').pop()?.toLowerCase() || ''
   return PPT_EXT_SET.has(ext)
+}
+
+function isExcelFileEntry(entry: { name: string; isDir: boolean; url?: string }): boolean {
+  if (entry.isDir || !entry.url) return false
+  const ext = entry.name.split('.').pop()?.toLowerCase() || ''
+  return EXCEL_EXT_SET.has(ext)
 }
 
 interface UserInfo {
@@ -131,12 +138,16 @@ function openImagePreview(entry: FileEntry) {
   previewVisible.value = true
 }
 
-/* --------------------------- 文件预览（PPT / TXT） --------------------------- */
+/* --------------------------- 文件预览（PPT / Excel / TXT） --------------------------- */
 
 const filePreviewVisible = ref(false)
-const filePreviewFile = ref<{ url: string; name?: string; type?: 'ppt' | 'txt' } | null>(null)
+const filePreviewFile = ref<{
+  url: string
+  name?: string
+  type?: 'ppt' | 'excel' | 'txt'
+} | null>(null)
 
-function openFilePreviewEntry(entry: FileEntry, type: 'ppt' | 'txt') {
+function openFilePreviewEntry(entry: FileEntry, type: 'ppt' | 'excel' | 'txt') {
   if (!entry.url) return
   filePreviewFile.value = { url: entry.url, name: entry.name, type }
   filePreviewVisible.value = true
@@ -523,9 +534,11 @@ onBeforeUnmount(() => {
                   ? openImagePreview(item)
                   : isPptFileEntry(item)
                     ? openFilePreviewEntry(item, 'ppt')
-                    : isTextFileEntry(item)
-                      ? openFilePreviewEntry(item, 'txt')
-                      : undefined"
+                    : isExcelFileEntry(item)
+                      ? openFilePreviewEntry(item, 'excel')
+                      : isTextFileEntry(item)
+                        ? openFilePreviewEntry(item, 'txt')
+                        : undefined"
             >
               <div class="col-name">
                 <img :src="iconFor(item)" class="fm-icon" alt="" />
@@ -546,6 +559,12 @@ onBeforeUnmount(() => {
                   class="fm-name link"
                   :title="item.name"
                   @click="openFilePreviewEntry(item, 'ppt')"
+                >{{ item.name }}</span>
+                <span
+                  v-else-if="isExcelFileEntry(item)"
+                  class="fm-name link"
+                  :title="item.name"
+                  @click="openFilePreviewEntry(item, 'excel')"
                 >{{ item.name }}</span>
                 <span
                   v-else-if="isTextFileEntry(item)"
@@ -733,7 +752,8 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 20px 32px 16px;
+  /* 左右 48：与列表区（margin 32 + 行内 padding 16）左缘对齐，面包屑和文件名才在一条线上 */
+  padding: 24px 48px 20px;
   flex-shrink: 0;
 }
 
@@ -825,7 +845,8 @@ onBeforeUnmount(() => {
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
-  margin: 0 24px 24px;
+  /* 行内还有 16px padding（hover 背景需要），32 + 16 = 48 与头部左右留白对齐 */
+  margin: 0 32px 28px;
   min-height: 0;
 }
 
@@ -851,36 +872,39 @@ onBeforeUnmount(() => {
   width: 100%;
 }
 
-/* 列宽（对齐参考：名称主列 + 大小/时间/操作） */
+/*
+ * 列宽：名称列吃掉剩余宽度，其余三列按内容给固定像素。
+ * 原先是百分比，窗口越宽「修改时间」列的富余空白越大，时间和操作按钮被拉得很远；
+ * 固定像素后时间文本右缘紧挨操作列，间距恒定为 12 + 8 = 20px。
+ */
 .col-name {
   display: flex;
   align-items: center;
   gap: 12px;
-  width: 52%;
+  flex: 1 1 auto;
   min-width: 0;
   padding-right: 16px;
 }
 
 .col-size {
-  width: 15%;
+  width: 96px;
   flex-shrink: 0;
   padding: 0 12px;
 }
 
 .col-time {
-  width: 23%;
-  min-width: 140px;
+  width: 152px;
   flex-shrink: 0;
-  padding: 0 12px;
+  padding: 0 12px 0 0;
 }
 
 .col-ops {
-  width: 10%;
+  width: 40px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  padding-left: 16px;
+  padding-left: 8px;
 }
 
 /* 行：h-44 + mb-6 = 50（与 ITEM_HEIGHT 一致） */

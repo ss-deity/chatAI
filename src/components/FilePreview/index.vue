@@ -1,23 +1,33 @@
 <script setup lang="ts">
 /**
- * 通用文件预览浮层：支持 PPT/PPTX（纯前端解析渲染）与 TXT 等文本文件。
+ * 通用文件预览浮层：支持 PPT/PPTX（纯前端解析渲染）、XLSX/XLS（@lucky-office/excel）与 TXT 等文本文件。
  *
  * - PPTX：在浏览器里 JSZip 解压 + 解析 OOXML → Slide JSON → HTML/CSS 渲染（见 pptx.ts），
  *   不依赖 LibreOffice、不需要后端转换。预览器提供缩略图、缩放、上一页/下一页、全屏、页码、下载。
  *   pptx 字节仍走 /api/files/raw 同源代理拿，因为 BOS 直链没开 CORS，浏览器 fetch 会被拦。
+ * - XLSX/XLS：交给 @lucky-office/excel（vue-office 二次开发，x-spreadsheet canvas 内核）渲染，
+ *   同样先用同源代理取到 ArrayBuffer 再喂给组件，不让它自己去 fetch BOS 直链。
+ *   组件体积不小且是低频功能，用 defineAsyncComponent 按需加载。
  * - TXT：fetch → 文本，展示前 200KB，剩余提示下载获取完整内容
  * 弹窗风格对齐 SideBar 中的 gf-dialog，主题变量来自 assets/theme.css。
  */
-import { computed, ref, watch, onUnmounted, nextTick } from 'vue'
+import { computed, defineAsyncComponent, ref, watch, onUnmounted, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import PptxSlide from './PptxSlide.vue'
 import { parsePptx, type PptxDeck } from './pptx'
 
+/** 打开 Excel 预览时才拉取该 chunk，避免拖慢首屏 */
+const VueOfficeExcel = defineAsyncComponent(async () => {
+  await import('@lucky-office/excel/lib/index.css')
+  const mod = await import('@lucky-office/excel')
+  return mod.default as never
+})
+
 interface PreviewFile {
   url: string
   name?: string
-  /** 'ppt' | 'txt'；不传则按扩展名自动推断 */
-  type?: 'ppt' | 'txt'
+  /** 'ppt' | 'excel' | 'txt'；不传则按扩展名自动推断 */
+  type?: 'ppt' | 'excel' | 'txt'
 }
 
 const props = withDefaults(
@@ -60,6 +70,11 @@ const stageW = ref(0)
 const stageH = ref(0)
 let stageObserver: ResizeObserver | null = null
 
+/* -------- Excel -------- */
+const excelBuffer = ref<ArrayBuffer | null>(null)
+/** 渲染中：字节到手但 x-spreadsheet 还没画完 */
+const excelRendering = ref(false)
+
 /* -------- refs -------- */
 const dialogRef = ref<HTMLElement | null>(null)
 const isFullscreen = ref(false)
@@ -70,11 +85,12 @@ const displayName = computed(() => {
   return raw
 })
 
-const resolvedType = computed<'ppt' | 'txt' | ''>(() => {
+const resolvedType = computed<'ppt' | 'excel' | 'txt' | ''>(() => {
   if (!props.file) return ''
   if (props.file.type) return props.file.type
   const name = (props.file.name || props.file.url || '').toLowerCase()
   if (name.endsWith('.ppt') || name.endsWith('.pptx')) return 'ppt'
+  if (name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.xlsm')) return 'excel'
   if (
     name.endsWith('.txt') ||
     name.endsWith('.md') ||
@@ -83,6 +99,16 @@ const resolvedType = computed<'ppt' | 'txt' | ''>(() => {
     name.endsWith('.csv')
   ) return 'txt'
   return ''
+})
+
+/** 老的 .xls 是 BIFF 二进制，要显式告诉组件按 xls 解析 */
+const excelOptions = computed(() => {
+  const name = (props.file?.name || props.file?.url || '').toLowerCase()
+  return {
+    xls: name.endsWith('.xls'),
+    minColLength: 20,
+    showContextmenu: false,
+  }
 })
 
 const slides = computed(() => deck.value?.slides ?? [])
@@ -164,6 +190,42 @@ async function loadText() {
   } finally {
     loading.value = false
   }
+}
+
+/* --------------------------- Excel --------------------------- */
+
+/** x-spreadsheet 是 canvas 渲染，超大表会明显卡；和 pptx 用同一档体积限制 */
+const EXCEL_PARSE_LIMIT = 20 * 1024 * 1024
+
+async function loadExcel() {
+  if (!props.file?.url) return
+  loading.value = true
+  errorMsg.value = ''
+  excelBuffer.value = null
+  try {
+    // 不把 URL 直接交给组件：BOS 没开 CORS，组件内部 fetch 会失败，这里先用同源代理取字节
+    const res = await fetch(proxyUrl(props.file.url))
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const buf = await res.arrayBuffer()
+    if (buf.byteLength > EXCEL_PARSE_LIMIT) {
+      throw new Error('文件超过 20MB，请下载后查看')
+    }
+    excelRendering.value = true
+    excelBuffer.value = buf
+  } catch (e) {
+    errorMsg.value = (e as Error).message || '加载失败'
+  } finally {
+    loading.value = false
+  }
+}
+
+function onExcelRendered() {
+  excelRendering.value = false
+}
+
+function onExcelError(e: unknown) {
+  excelRendering.value = false
+  errorMsg.value = (e as Error)?.message || '表格渲染失败'
 }
 
 /* --------------------------- PPT --------------------------- */
@@ -350,6 +412,14 @@ function handleKeyDown(e: KeyboardEvent) {
     if (!document.fullscreenElement) close()
     return
   }
+  // Excel 只支持全屏快捷键，翻页/缩放交给 x-spreadsheet 自己的滚动
+  if (resolvedType.value === 'excel') {
+    if (e.key.toLowerCase() === 'f') {
+      e.preventDefault()
+      toggleFullscreen()
+    }
+    return
+  }
   if (resolvedType.value !== 'ppt') return
   if (e.key === 'ArrowLeft') {
     e.preventDefault()
@@ -377,6 +447,7 @@ watch(
       document.addEventListener('keydown', handleKeyDown)
       document.addEventListener('fullscreenchange', onFullscreenChange)
       if (resolvedType.value === 'txt') loadText()
+      else if (resolvedType.value === 'excel') loadExcel()
       else if (resolvedType.value === 'ppt') {
         loadPptx()
         observeStage()
@@ -392,6 +463,8 @@ watch(
       textContent.value = ''
       errorMsg.value = ''
       textTruncated.value = false
+      excelBuffer.value = null
+      excelRendering.value = false
       stageObserver?.disconnect()
       stageObserver = null
       disposeDeck()
@@ -422,7 +495,12 @@ onUnmounted(() => {
         <div
           ref="dialogRef"
           class="fp-dialog"
-          :class="{ 'is-ppt': resolvedType === 'ppt', 'is-fullscreen': isFullscreen }"
+          :class="{
+            'is-ppt': resolvedType === 'ppt',
+            'is-excel': resolvedType === 'excel',
+            'is-fullscreen': isFullscreen,
+          }"
+
           role="dialog"
           aria-modal="true"
         >
@@ -434,7 +512,7 @@ onUnmounted(() => {
                 class="fp-page-indicator"
               >{{ currentPage + 1 }} / {{ totalPages }}</span>
               <button
-                v-if="resolvedType === 'ppt'"
+                v-if="resolvedType === 'ppt' || resolvedType === 'excel'"
                 class="fp-icon-btn"
                 :title="isFullscreen ? '退出全屏 (F)' : '全屏 (F)'"
                 @click="toggleFullscreen"
@@ -531,6 +609,31 @@ onUnmounted(() => {
               </div>
             </template>
 
+            <!-- Excel：@lucky-office/excel 渲染 -->
+            <template v-else-if="resolvedType === 'excel'">
+              <div v-if="loading" class="fp-center fp-loading">
+                <span class="fp-spinner" />
+                <span>正在加载表格…</span>
+              </div>
+              <div v-else-if="errorMsg" class="fp-center fp-empty-error">
+                <div>预览失败：{{ errorMsg }}</div>
+                <button class="gf-btn gf-btn-plain fp-retry" @click="loadExcel">重试</button>
+              </div>
+              <div v-else class="fp-excel">
+                <div v-if="excelRendering" class="fp-excel-mask">
+                  <span class="fp-spinner" />
+                </div>
+                <VueOfficeExcel
+                  v-if="excelBuffer"
+                  :src="excelBuffer"
+                  :options="excelOptions"
+                  class="fp-excel-view"
+                  @rendered="onExcelRendered"
+                  @error="onExcelError"
+                />
+              </div>
+            </template>
+
             <!-- TXT / 文本类 -->
             <template v-else-if="resolvedType === 'txt'">
               <div v-if="loading" class="fp-center">加载中…</div>
@@ -612,6 +715,42 @@ onUnmounted(() => {
 .fp-dialog.is-ppt {
   width: min(1200px, calc(100vw - 32px));
   height: min(760px, calc(100vh - 48px));
+}
+
+.fp-dialog.is-excel {
+  width: min(1280px, calc(100vw - 32px));
+  height: min(800px, calc(100vh - 48px));
+}
+
+/* Excel：组件内部自己管滚动与 sheet 切换栏，这里只给它一块定高容器 */
+.fp-excel {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  background: var(--gf-bg-panel);
+}
+
+.fp-excel-view {
+  width: 100%;
+  height: 100%;
+}
+
+/*
+ * x-spreadsheet 的横向/纵向滚动发生在它自己的滚动条容器里，滚到边界后滚动量会继续
+ * 往外传播，被浏览器当成翻页手势（macOS 上表现为侧滑返回）。contain 把滚动锁在表格内。
+ */
+.fp-excel-view :deep(.x-spreadsheet-scrollbar) {
+  overscroll-behavior: contain;
+}
+
+.fp-excel-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--gf-bg-panel);
 }
 
 .fp-dialog.is-fullscreen {
