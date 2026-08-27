@@ -95,6 +95,8 @@ function handleSelect(id: string) {
 
 function toggleFold() {
   isFold.value = !isFold.value
+  // 展开/收起侧边栏时布局会整体变化，用户面板留在原位会错位，直接收起
+  showUserMenu.value = false
 }
 
 function toggleUserMenu() {
@@ -158,6 +160,8 @@ function confirmRename() {
 
 function handleGlobalClick() {
   activeMenuId.value = ''
+  // 面板自身与触发按钮上的点击都被 .stop 拦住了，能走到这里的都是点在别处
+  showUserMenu.value = false
 }
 
 onMounted(() => {
@@ -286,7 +290,7 @@ function handleSettings() {
 
       <!-- 底部用户区域 -->
       <div class="user-area">
-        <div class="user-entry" @click="toggleUserMenu">
+        <div class="user-entry" @click.stop="toggleUserMenu">
           <div class="user-avatar">
             <img v-if="props.user?.avatar" :src="props.user.avatar" alt="avatar" />
             <svg v-else width="24" height="24" viewBox="0 0 24 24" fill="none">
@@ -295,24 +299,6 @@ function handleSettings() {
             </svg>
           </div>
           <span class="user-name">{{ props.user?.nickname || props.user?.username || '用户' }}</span>
-        </div>
-
-        <!-- 弹出菜单 -->
-        <div v-if="showUserMenu" class="user-menu">
-          <div class="user-menu-item" @click="handleSettings">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <path d="M8 10a2 2 0 100-4 2 2 0 000 4z" stroke="currentColor" stroke-width="1.2"/>
-              <path d="M13.7 6.5l-.7-.4a5.2 5.2 0 000-1.2l.7-.4a.5.5 0 00.2-.6l-.5-.9a.5.5 0 00-.6-.2l-.7.3a5 5 0 00-1-.6V2a.5.5 0 00-.5-.5h-1a.5.5 0 00-.5.5v.5a5 5 0 00-1 .6l-.7-.3a.5.5 0 00-.6.2l-.5.9a.5.5 0 00.2.6l.7.4a5.2 5.2 0 000 1.2l-.7.4a.5.5 0 00-.2.6l.5.9a.5.5 0 00.6.2l.7-.3a5 5 0 001 .6V14a.5.5 0 00.5.5h1a.5.5 0 00.5-.5v-.5a5 5 0 001-.6l.7.3a.5.5 0 00.6-.2l.5-.9a.5.5 0 00-.2-.6l-.7-.4a5.2 5.2 0 000-1.2l.7-.4a.5.5 0 00.2-.6l-.5-.9a.5.5 0 00-.6-.2l-.7.3" stroke="currentColor" stroke-width="1.2"/>
-            </svg>
-            <span>设置</span>
-          </div>
-          <div class="user-menu-divider"></div>
-          <div class="user-menu-item logout" @click="handleLogout">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <path d="M6 2H4a2 2 0 00-2 2v8a2 2 0 002 2h2M10.5 11.5L14 8l-3.5-3.5M14 8H6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-            <span>退出登录</span>
-          </div>
         </div>
       </div>
     </div>
@@ -345,11 +331,38 @@ function handleSettings() {
         </svg>
       </button>
       <div class="fold-spacer"></div>
-      <div class="fold-user-avatar" @click="toggleUserMenu" title="用户">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+      <div class="fold-user-avatar" @click.stop="toggleUserMenu" title="用户">
+        <img v-if="props.user?.avatar" :src="props.user.avatar" alt="avatar" />
+        <svg v-else width="20" height="20" viewBox="0 0 24 24" fill="none">
           <circle cx="12" cy="8" r="4" fill="#bfbfbf"/>
           <path d="M4 20c0-3.3 3.6-6 8-6s8 2.7 8 6" fill="#bfbfbf"/>
         </svg>
+      </div>
+    </div>
+
+    <!--
+      用户设置面板：展开态与折叠态共用一份，挂在 sidebar 上按状态换定位，
+      折叠时向右侧弹出（48px 的窄栏放不下 180px 的面板）。
+    -->
+    <div
+      v-if="showUserMenu"
+      class="user-menu"
+      :class="{ 'user-menu-fold': isFold }"
+      @click.stop
+    >
+      <div class="user-menu-item" @click="handleSettings">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <path d="M8 10a2 2 0 100-4 2 2 0 000 4z" stroke="currentColor" stroke-width="1.2"/>
+          <path d="M13.7 6.5l-.7-.4a5.2 5.2 0 000-1.2l.7-.4a.5.5 0 00.2-.6l-.5-.9a.5.5 0 00-.6-.2l-.7.3a5 5 0 00-1-.6V2a.5.5 0 00-.5-.5h-1a.5.5 0 00-.5.5v.5a5 5 0 00-1 .6l-.7-.3a.5.5 0 00-.6.2l-.5.9a.5.5 0 00.2.6l.7.4a5.2 5.2 0 000 1.2l-.7.4a.5.5 0 00-.2.6l.5.9a.5.5 0 00.6.2l.7-.3a5 5 0 001 .6V14a.5.5 0 00.5.5h1a.5.5 0 00.5-.5v-.5a5 5 0 001-.6l.7.3a.5.5 0 00.6-.2l.5-.9a.5.5 0 00-.2-.6l-.7-.4a5.2 5.2 0 000-1.2l.7-.4a.5.5 0 00.2-.6l-.5-.9a.5.5 0 00-.6-.2l-.7.3" stroke="currentColor" stroke-width="1.2"/>
+        </svg>
+        <span>设置</span>
+      </div>
+      <div class="user-menu-divider"></div>
+      <div class="user-menu-item logout" @click="handleLogout">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <path d="M6 2H4a2 2 0 00-2 2v8a2 2 0 002 2h2M10.5 11.5L14 8l-3.5-3.5M14 8H6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>退出登录</span>
       </div>
     </div>
 
@@ -472,6 +485,8 @@ function handleSettings() {
   transition: width 0.2s ease, background-color 0.2s ease, border-color 0.2s ease;
   display: flex;
   flex-direction: column;
+  /* 用户设置面板绝对定位到侧边栏，展开/折叠共用一份 DOM */
+  position: relative;
 }
 
 .sidebar:not(.fold) {
@@ -780,9 +795,9 @@ function handleSettings() {
 /* 弹出菜单 */
 .user-menu {
   position: absolute;
-  bottom: 100%;
-  left: 8px;
-  margin-bottom: 8px;
+  /* 贴着用户入口上沿弹出，比之前更靠下，不再顶到会话列表里 */
+  bottom: 60px;
+  left: 20px;
   width: 180px;
   background: var(--gf-bg-panel);
   border: 1px solid var(--gf-border);
@@ -790,6 +805,12 @@ function handleSettings() {
   box-shadow: var(--gf-shadow-menu);
   padding: 4px;
   z-index: 100;
+}
+
+/* 折叠态：窄栏放不下，向右侧弹出 */
+.user-menu-fold {
+  bottom: 12px;
+  left: 56px;
 }
 
 .user-menu-item {
@@ -843,6 +864,7 @@ function handleSettings() {
   width: 32px;
   height: 32px;
   border-radius: 50%;
+  overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -851,6 +873,12 @@ function handleSettings() {
   flex-shrink: 0;
   transition: background 0.15s;
   color: var(--gf-text-tertiary);
+}
+
+.fold-user-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .fold-user-avatar:hover {

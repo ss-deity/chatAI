@@ -50,10 +50,17 @@ import {
 
 const props = defineProps<{ flowchart: FlowchartArtifact }>()
 
+/** 手动缩放的步长与上下限：一次点击走 0.1，避免按钮点一下跳一大截 */
+const ZOOM_STEP = 0.1
+const ZOOM_MIN = 0.2
+const ZOOM_MAX = 3
+
 const boxRef = ref<HTMLDivElement | null>(null)
 const zoomBoxRef = ref<HTMLDivElement | null>(null)
 const zoomed = ref(false)
 const theme = ref<FlowTheme>(currentFlowTheme())
+/** 当前缩放比例，展示在底部条上（滚轮缩放也会同步） */
+const zoomLevel = ref(1)
 
 /** G6 实例内部对象很多，用 shallowRef 避免被 Vue 深度代理 */
 const graph = shallowRef<Graph | null>(null)
@@ -114,8 +121,8 @@ function mount(el: HTMLDivElement, wheelZoom: boolean): Graph {
     autoResize: false,
     background: t.background,
     padding: 12,
-    autoFit: { type: 'view', options: { when: 'overflow', direction: 'both' } },
-    zoomRange: [0.3, 3],
+    autoFit: { type: 'view', options: { when: 'always', direction: 'both' } },
+    zoomRange: [ZOOM_MIN, ZOOM_MAX],
     data: graphData(),
     layout: {
       type: 'antv-dagre',
@@ -168,7 +175,11 @@ function mount(el: HTMLDivElement, wheelZoom: boolean): Graph {
     behaviors: [
       'drag-canvas',
       // 滚轮缩放要按住 Ctrl，避免抢走页面滚动
-      { type: 'zoom-canvas', trigger: wheelZoom ? undefined : (['Control'] as string[]) },
+      {
+        type: 'zoom-canvas',
+        trigger: wheelZoom ? undefined : (['Control'] as string[]),
+        onFinish: () => syncZoomLevel(),
+      },
     ],
     plugins: [
       {
@@ -188,8 +199,40 @@ function mount(el: HTMLDivElement, wheelZoom: boolean): Graph {
     ],
   })
 
-  void instance.render()
+  // 初始化后主动整体适配一次：大图默认要能一眼看全，不能有内容被裁在视口外
+  void instance.render().then(async () => {
+    if (instance.destroyed) return
+    await instance.fitView({ when: 'always', direction: 'both' })
+    syncZoomLevel()
+  })
   return instance
+}
+
+/** 当前生效的实例：放大弹窗打开时操作弹窗里的那张 */
+function activeGraph(): Graph | null {
+  const instance = zoomed.value ? zoomGraph.value : graph.value
+  return instance && !instance.destroyed ? instance : null
+}
+
+function syncZoomLevel() {
+  const instance = activeGraph()
+  if (instance) zoomLevel.value = instance.getZoom()
+}
+
+/** 按固定步长缩放，并夹在 zoomRange 内 */
+async function stepZoom(delta: number) {
+  const instance = activeGraph()
+  if (!instance) return
+  const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, instance.getZoom() + delta))
+  await instance.zoomTo(Number(next.toFixed(2)))
+  syncZoomLevel()
+}
+
+async function fitAll() {
+  const instance = activeGraph()
+  if (!instance) return
+  await instance.fitView({ when: 'always', direction: 'both' })
+  syncZoomLevel()
 }
 
 function renderMain(el: HTMLDivElement | null) {
@@ -205,7 +248,7 @@ function renderMain(el: HTMLDivElement | null) {
     const instance = graph.value
     if (!instance || instance.destroyed) return
     instance.resize()
-    void instance.fitView({ when: 'overflow', direction: 'both' })
+    void instance.fitView({ when: 'always', direction: 'both' }).then(() => syncZoomLevel())
   })
   observer.observe(el)
 }
@@ -270,11 +313,15 @@ function closeZoom() {
   zoomGraph.value?.destroy()
   zoomGraph.value = null
   zoomed.value = false
+  syncZoomLevel()
 }
 
 function handleAction(action: ChartAction) {
   if (action === 'zoom') void openZoom()
   else if (action === 'download') void download()
+  else if (action === 'zoomIn') void stepZoom(ZOOM_STEP)
+  else if (action === 'zoomOut') void stepZoom(-ZOOM_STEP)
+  else if (action === 'fit') void fitAll()
   else closeZoom()
 }
 </script>
@@ -287,7 +334,13 @@ function handleAction(action: ChartAction) {
       <span class="chat-flowchart__source" :title="flowchart.title">
         {{ flowchart.title }} · {{ flowchart.nodes.length }} 个节点
       </span>
-      <ChartTools :actions="['zoom', 'download']" @action="handleAction" />
+      <div class="chat-flowchart__actions">
+        <span class="chat-flowchart__zoom">{{ Math.round(zoomLevel * 100) }}%</span>
+        <ChartTools
+          :actions="['zoomOut', 'zoomIn', 'fit', 'zoom', 'download']"
+          @action="handleAction"
+        />
+      </div>
     </div>
 
     <!-- 放大预览：独立实例，关闭即销毁 -->
@@ -295,11 +348,14 @@ function handleAction(action: ChartAction) {
       <div class="chat-flowchart__dialog">
         <div class="chat-flowchart__dialog-head">
           <span class="chat-flowchart__dialog-title">{{ flowchart.title }}</span>
-          <ChartTools
-            :actions="['download', 'close']"
-            tip-placement="bottom"
-            @action="handleAction"
-          />
+          <div class="chat-flowchart__actions">
+            <span class="chat-flowchart__zoom">{{ Math.round(zoomLevel * 100) }}%</span>
+            <ChartTools
+              :actions="['zoomOut', 'zoomIn', 'fit', 'download', 'close']"
+              tip-placement="bottom"
+              @action="handleAction"
+            />
+          </div>
         </div>
         <div ref="zoomBoxRef" class="chat-flowchart__canvas chat-flowchart__canvas--large"></div>
       </div>
@@ -333,6 +389,21 @@ function handleAction(action: ChartAction) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.chat-flowchart__actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.chat-flowchart__zoom {
+  min-width: 38px;
+  text-align: right;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--gf-text-disabled);
 }
 
 .chat-flowchart__canvas {
