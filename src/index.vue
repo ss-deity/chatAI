@@ -43,6 +43,7 @@ import { autoTaskMap } from './components/AutoTask/const'
 import { fetchMentionImages, type MentionFile } from './utils/mentionFiles'
 import SkillPanel from './components/SkillPanel/index.vue'
 import ToolCallInfo, { type ToolCall } from './components/ToolCallInfo/index.vue'
+import ChatEcharts, { type ChartArtifact } from './components/ChatEcharts/index.vue'
 import ChatLoading from './components/ChatLoading/index.vue'
 import FilePreview from './components/FilePreview/index.vue'
 import { fetchSkills, type Skill } from './utils/skills'
@@ -73,6 +74,8 @@ interface Message {
   attachments?: RemoteAttachment[]
   /** 本条回复触发的工具调用及其状态，渲染在正文上方 */
   toolCalls?: ToolCall[]
+  /** 本条回复产出的 ECharts 图表（如 Excel 转图表），渲染在正文下方 */
+  charts?: ChartArtifact[]
   /**
    * 本条回复失败时的错误提示（余额不足 / 限流 / 鉴权失败 / 连接中断等）。
    * 与 content 并存：已经流出来的部分内容照常展示，下方再挂一条错误条。
@@ -230,7 +233,7 @@ async function handleFilesSelected(rawFiles: File[]) {
   })
   // 2) 大小
   arr = arr.filter(checkFileSize)
-  // 3) 图片分辨率（仅 jimeng 之类配置了 resolution 的场景）
+  // 3) 图片分辨率（仅配置了 resolution 的模型）
   if (cfg.resolution) {
     const results = await Promise.all(arr.map((f) => checkImageResolution(f, cfg.resolution!)))
     arr = arr.filter((_, i) => results[i])
@@ -314,16 +317,17 @@ function toAttachmentDisplay(list: RemoteAttachment[]): Attachment[] {
  */
 const mentionTokens = new Map<string, string>()
 
-/** tribute 实例；只在图片生成模型（即梦）下挂载 */
+/** tribute 实例；仅在允许带图片附件的模型下挂载 */
 let tribute: Tribute<MentionFile> | null = null
 
 /**
- * @ 是否可用：只有图片生成模型（capability=image，即即梦）才需要 @ 选图，
- * 其它模型下不挂载 tribute，@ 就是普通字符。
+ * @ 是否可用：文本模型现在也能通过 generate_image 工具改图/以图生图，
+ * 所以只要当前模型允许带图片附件就挂载 tribute；不允许上传时 @ 就是普通字符。
  */
-const mentionEnabled = computed(
-  () => getModel(selectedModel.value).capability === 'image' && !!uploadConfig.value,
-)
+const mentionEnabled = computed(() => {
+  const cfg = uploadConfig.value
+  return !!cfg && cfg.fileType.includes('image/')
+})
 
 /** values 回调防抖，避免每敲一个字都打一次接口 */
 let mentionTimer: ReturnType<typeof setTimeout> | null = null
@@ -1169,18 +1173,18 @@ function renderMarkdown(content: string): string {
 
 interface FilePreviewState {
   visible: boolean
-  file: { url: string; name?: string; type?: 'ppt' | 'txt' } | null
+  file: { url: string; name?: string; type?: 'ppt' | 'excel' | 'txt' } | null
 }
 
 const filePreview = reactive<FilePreviewState>({ visible: false, file: null })
 
-function openFilePreview(url: string, name?: string, type?: 'ppt' | 'txt') {
+function openFilePreview(url: string, name?: string, type?: 'ppt' | 'excel' | 'txt') {
   filePreview.file = { url, name, type }
   filePreview.visible = true
 }
 
 /**
- * 会话消息区的委托点击：当 assistant markdown 中出现 PPT 链接时，
+ * 会话消息区的委托点击：当 assistant markdown 中出现 PPT / Excel 链接时，
  * 拦截默认跳转/下载行为，改为弹窗预览。
  */
 function handleMessageListClick(e: MouseEvent) {
@@ -1193,10 +1197,17 @@ function handleMessageListClick(e: MouseEvent) {
   const href = anchor.getAttribute('href') || ''
   if (!href) return
   const lower = href.toLowerCase().split('?')[0].split('#')[0]
+  const name = anchor.textContent?.trim() || undefined
   if (lower.endsWith('.ppt') || lower.endsWith('.pptx')) {
     e.preventDefault()
-    const name = anchor.textContent?.trim() || undefined
     openFilePreview(href, name, 'ppt')
+  } else if (
+    lower.endsWith('.xlsx') ||
+    lower.endsWith('.xls') ||
+    lower.endsWith('.xlsm')
+  ) {
+    e.preventDefault()
+    openFilePreview(href, name, 'excel')
   }
 }
 
@@ -1221,13 +1232,14 @@ function waitingLabel(msg: Message): string {
     : '正在思考'
 }
 
-function normalizeMessages(rawMessages: Array<{ role: string; content: string; images?: string[]; attachments?: RemoteAttachment[]; toolCalls?: ToolCall[] }> | undefined): Message[] {
+function normalizeMessages(rawMessages: Array<{ role: string; content: string; images?: string[]; attachments?: RemoteAttachment[]; toolCalls?: ToolCall[]; charts?: ChartArtifact[] }> | undefined): Message[] {
   return (rawMessages ?? []).map((item) => ({
     role: item.role === 'assistant' ? 'assistant' : 'user',
     content: item.content ?? '',
     images: item.images && item.images.length ? item.images : undefined,
     attachments: item.attachments && item.attachments.length ? item.attachments : undefined,
     toolCalls: item.toolCalls && item.toolCalls.length ? item.toolCalls : undefined,
+    charts: item.charts && item.charts.length ? item.charts : undefined,
   }))
 }
 
@@ -1504,6 +1516,19 @@ function startChatStream(
           if (activeChatId.value === currentKey) scrollToBottom()
         }
       }
+      // 图表增量：服务端工具（如 Excel 转图表）产出的完整 ECharts option，追加渲染
+      const charts = (payload.choices as Array<{ delta?: { charts?: ChartArtifact[] } }> | undefined)?.[0]?.delta?.charts
+      if (charts && charts.length) {
+        const s = sessionStates[currentKey]
+        const idx = s?.assistantIndex ?? -1
+        if (s && idx >= 0 && idx < s.messages.length) {
+          s.messages[idx] = {
+            ...s.messages[idx],
+            charts: [...(s.messages[idx].charts ?? []), ...charts],
+          }
+          if (activeChatId.value === currentKey) scrollToBottom()
+        }
+      }
     },
     onMessage(content) {
       const s = sessionStates[currentKey]
@@ -1774,7 +1799,8 @@ watch(
 
     <div v-else class="main-container">
       <div class="chat-wrapper" :class="{ 'has-work': messages.length > 0 }">
-        <!-- 消息列表 -->
+        <!-- 消息列表：滚动容器占满整个会话区（滚动条贴页面右缘），
+             内容宽度由内层 message-list-inner 限制并居中 -->
         <div
           v-if="messages.length > 0"
           ref="chatListRef"
@@ -1782,7 +1808,8 @@ watch(
           @scroll.passive="handleChatScroll"
           @click="handleMessageListClick"
         >
-          <template v-for="(msg, idx) in messages" :key="idx">
+          <div class="message-list-inner">
+            <template v-for="(msg, idx) in messages" :key="idx">
             <div
               class="message-item"
               :class="msg.role"
@@ -1790,6 +1817,7 @@ watch(
               <div
                 v-if="msg.role === 'assistant'"
                 class="message-bubble markdown-body"
+                :class="{ 'has-charts': msg.charts && msg.charts.length }"
               >
                 <ToolCallInfo v-if="msg.toolCalls && msg.toolCalls.length" :tools="msg.toolCalls" />
                 <div v-if="msg.content" v-html="renderMarkdown(msg.content)"></div>
@@ -1802,6 +1830,12 @@ watch(
                   v-if="msg.images && msg.images.length"
                   :images="msg.images"
                   :user-id="currentUser?.id"
+                />
+                <!-- Excel 转出的 ECharts 图表：option 由服务端生成，前端只负责渲染 -->
+                <ChatEcharts
+                  v-for="chart in msg.charts ?? []"
+                  :key="chart.id"
+                  :chart="chart"
                 />
                 <!-- 生成失败提示：与已流出的内容并存，明确区分「回答完了」和「中断了」 -->
                 <div v-if="msg.error" class="message-error">
@@ -1838,7 +1872,8 @@ watch(
                 </div>
               </template>
             </div>
-          </template>
+            </template>
+          </div>
         </div>
 
         <!-- 首屏 Hero 标题：仅无消息时显示 -->
@@ -2019,6 +2054,12 @@ html, body, #app {
   width: 100%;
   height: 100%;
   overflow: hidden;
+  /*
+   * 禁掉 overscroll：页面本身不滚动，内部区域（Excel 预览、代码块、宽表格）横向滚到
+   * 边界后，浏览器会把多余的滚动量当成手势——在 macOS 上就是触发「侧滑返回上一页」，
+   * 正在看的会话会直接被切走。
+   */
+  overscroll-behavior: none;
   background: var(--gf-bg-page);
   color: var(--gf-text-primary);
   transition: background-color 0.2s ease, color 0.2s ease;
@@ -2148,6 +2189,29 @@ html, body, #app {
   align-items: center;
   min-width: 560px;
   background: var(--gf-bg-panel);
+  /*
+   * 会话内容宽度：Hero、消息列表、输入框三处共用，改这里就够。
+   * 大屏上逐档放宽，窄屏保持 800 不变（再宽行长会超过舒适阅读区间）。
+   */
+  --chat-content-width: 800px;
+}
+
+@media (min-width: 1440px) {
+  .main-container {
+    --chat-content-width: 900px;
+  }
+}
+
+@media (min-width: 1680px) {
+  .main-container {
+    --chat-content-width: 1000px;
+  }
+}
+
+@media (min-width: 1920px) {
+  .main-container {
+    --chat-content-width: 1100px;
+  }
 }
 
 .chat-wrapper {
@@ -2164,8 +2228,9 @@ html, body, #app {
 
 /* 首屏 Hero 标题 */
 .hero-block {
-  width: calc(100% - 40px);
-  max-width: 800px;
+  /* 52 = 左右各 20 内容留白 + 12 滚动条槽位，与消息区（见 .message-list）严格对齐 */
+  width: calc(100% - 52px);
+  max-width: var(--chat-content-width);
   margin: 0 auto 24px;
   text-align: center;
   user-select: none;
@@ -2252,12 +2317,23 @@ html, body, #app {
   }
 }
 
+/*
+ * 滚动容器铺满整个会话区，滚动条因此贴在页面最右侧，而不是压在内容边缘。
+ * scrollbar-gutter 让两侧都预留滚动条槽位，内容不会因为滚动条出现而左移几像素。
+ */
 .message-list {
   flex: 1 1 auto;
   overflow-y: auto;
+  scrollbar-gutter: stable both-edges;
   padding: 24px 0;
+  width: 100%;
+}
+
+/* 真正限制阅读宽度的一层：这里减 40（左右各 20），加上父级两侧各 6px 的
+   滚动条槽位，实际留白与 hero / 输入框的 calc(100% - 52px) 一致 */
+.message-list-inner {
   width: calc(100% - 40px);
-  max-width: 800px;
+  max-width: var(--chat-content-width);
   margin: 0 auto;
 }
 
@@ -2282,6 +2358,17 @@ html, body, #app {
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/*
+ * 带图表的回复：气泡默认是「按内容收缩」的，图表卡片自身宽度是 100%，
+ * 于是图表先到、文本还没流出来时气泡会塌成一条窄条，等文本把气泡撑开后图表才变宽。
+ * 有图表就直接占满可用宽度，图表从出现的第一帧就是完整宽度。
+ */
+.message-bubble.has-charts {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 /* 生成失败提示条：挂在 assistant 气泡内容下方 */
@@ -2481,8 +2568,9 @@ html, body, #app {
   padding-top: 12px;
   flex-shrink: 0;
   margin: 0 auto;
-  width: calc(100% - 40px);
-  max-width: 800px;
+  /* 52 = 左右各 20 内容留白 + 12 滚动条槽位，让输入框与上方消息严格同宽 */
+  width: calc(100% - 52px);
+  max-width: var(--chat-content-width);
 }
 
 .chat-input-wrapper {

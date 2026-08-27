@@ -65,6 +65,10 @@
   --gf-code-bg: #0f172a;
   --gf-code-text: #e2e8f0;
 
+  /* 轻量气泡提示（icon 按钮 hover 的文案提示） */
+  --gf-tooltip-bg: rgba(3, 11, 26, 0.86);
+  --gf-tooltip-text: #ffffff;
+
   /* 滚动条（pc-genflow-pro 风格：细窄、圆角、hover 加深） */
   --gf-scrollbar-thumb: rgba(3, 11, 26, 0.18);
   --gf-scrollbar-thumb-hover: rgba(3, 11, 26, 0.32);
@@ -129,6 +133,10 @@
   /* 代码块 */
   --gf-code-bg: #0b1220;
   --gf-code-text: #e2e8f0;
+
+  /* 轻量气泡提示 */
+  --gf-tooltip-bg: rgba(30, 42, 68, 0.96);
+  --gf-tooltip-text: #e2e8f0;
 
   /* 滚动条 */
   --gf-scrollbar-thumb: rgba(226, 232, 240, 0.18);

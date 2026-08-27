@@ -1,7 +1,7 @@
 /**
  * 输入框文件上传：校验、压缩、直传后端 BOS。
  *
- * 参考 enterprise-ai-assistant 的 useUploadFile 交互与限制，按 chatAI 的两个模型（deepseek-v4 / jimeng-v4.6）改写。
+ * 参考 enterprise-ai-assistant 的 useUploadFile 交互与限制，按 chatAI 的模型（deepseek-v4 / openapi）改写。
  * 后端 BOS 直传：POST /api/upload?userId=&dir=chat  ->  { code:0, data:{ url } }
  */
 import imageCompression from 'browser-image-compression'
@@ -99,14 +99,6 @@ export const MODEL_UPLOAD_CONFIG: Record<string, UploadConfig> = {
     fileType: `image/png,image/jpeg,image/webp,application/pdf,text/plain,text/csv,${XLSX_MIME}`,
     hitWord:
       '上传附件，最多3个，文档支持 pdf、txt、csv、xlsx，图片支持 png、jpeg、webp，文档最大 50MB（xlsx 20MB），图片最大 30MB',
-  },
-  'jimeng-v4.6': {
-    maxCount: 5,
-    maxImgCompressLimit: 15,
-    targetCompressMB: 10,
-    fileType: 'image/png,image/jpeg',
-    hitWord: '上传图片，最多 5 个，支持 jpeg / png，单张最大 30MB',
-    resolution: { maxWH: 4096, ratioLimitMiniWH: 0.33, ratioLimitMaxWH: 3 },
   },
 }
 
