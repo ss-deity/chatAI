@@ -67,6 +67,8 @@ const graph = shallowRef<Graph | null>(null)
 const zoomGraph = shallowRef<Graph | null>(null)
 let observer: ResizeObserver | null = null
 let themeObserver: MutationObserver | null = null
+/** 挂了 wheel 兜底监听的卡片容器，重建/卸载时要摘掉 */
+let wheelGuardEl: HTMLDivElement | null = null
 
 /**
  * 卡片高度按节点数估算：布局前拿不到实际层数，宁可给足高度，
@@ -178,6 +180,9 @@ function mount(el: HTMLDivElement, wheelZoom: boolean): Graph {
       {
         type: 'zoom-canvas',
         trigger: wheelZoom ? undefined : (['Control'] as string[]),
+        // G6 的 zoom-canvas 会无条件 preventDefault 画布上的 wheel，
+        // 卡片里那样会把会话列表的滚动一起吃掉；这里关掉，改由 guardWheel 只拦 Ctrl+滚轮
+        preventDefault: wheelZoom,
         onFinish: () => syncZoomLevel(),
       },
     ],
@@ -235,14 +240,29 @@ async function fitAll() {
   syncZoomLevel()
 }
 
+/**
+ * 卡片内滚轮的兜底策略：
+ * Ctrl+滚轮是画布缩放手势，阻止浏览器整页缩放；不带 Ctrl 的滚轮不拦，
+ * 事件继续冒泡给会话列表滚动（G6 自己的 preventDefault 已在 mount 里关掉）。
+ */
+function guardWheel(e: WheelEvent) {
+  if (e.ctrlKey) e.preventDefault()
+}
+
 function renderMain(el: HTMLDivElement | null) {
   graph.value?.destroy()
   graph.value = null
   observer?.disconnect()
   observer = null
+  if (wheelGuardEl) {
+    wheelGuardEl.removeEventListener('wheel', guardWheel)
+    wheelGuardEl = null
+  }
   if (!el) return
 
   graph.value = mount(el, false)
+  el.addEventListener('wheel', guardWheel, { passive: false })
+  wheelGuardEl = el
   // 侧边栏收放、窗口缩放都要重新适配画布
   observer = new ResizeObserver(() => {
     const instance = graph.value
@@ -282,6 +302,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   observer?.disconnect()
   themeObserver?.disconnect()
+  wheelGuardEl?.removeEventListener('wheel', guardWheel)
+  wheelGuardEl = null
   graph.value?.destroy()
   zoomGraph.value?.destroy()
 })

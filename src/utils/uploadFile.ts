@@ -60,12 +60,22 @@ const getMB = (n: number) => n * 1024 * 1024
 const XLSX_MIME =
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
+/** Word / PPT 的 OOXML MIME，同样需要扩展名兜底 */
+const DOCX_MIME =
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+const PPTX_MIME =
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+
 /** 单个文件按 MIME 的大小上限（byte） */
 const FILE_SIZE_LIMITS: Record<string, number> = {
   'application/pdf': getMB(50),
   'text/plain': getMB(50),
+  'text/markdown': getMB(50),
   'text/csv': getMB(50),
+  'application/json': getMB(50),
   [XLSX_MIME]: getMB(20),
+  [DOCX_MIME]: getMB(20),
+  [PPTX_MIME]: getMB(20),
   'image/png': getMB(30),
   'image/jpeg': getMB(30),
   'image/webp': getMB(30),
@@ -77,10 +87,36 @@ const MIME_TO_EXTENSIONS: Record<string, string[]> = {
   'image/jpeg': ['jpg', 'jpeg'],
   'image/webp': ['webp'],
   'application/pdf': ['pdf'],
-  'text/plain': ['txt'],
+  'text/plain': ['txt', 'log'],
+  'text/markdown': ['md', 'markdown'],
   'text/csv': ['csv'],
-  [XLSX_MIME]: ['xlsx'],
+  'application/json': ['json'],
+  [XLSX_MIME]: ['xlsx', 'xlsm'],
+  [DOCX_MIME]: ['docx'],
+  [PPTX_MIME]: ['pptx'],
 }
+
+/**
+ * 各模型可带的附件类型。
+ * 注意：网关只能内联解析文本类与 xlsx 的正文，pdf/docx/pptx 目前只把文件名与链接给模型，
+ * 所以这几类更多是「带上下文引用」，不要期望模型逐页读内容。
+ */
+const ATTACHMENT_MIMES = [
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'application/pdf',
+  'text/plain',
+  'text/markdown',
+  'text/csv',
+  'application/json',
+  XLSX_MIME,
+  DOCX_MIME,
+  PPTX_MIME,
+].join(',')
+
+const ATTACHMENT_HINT =
+  '上传附件，最多3个，文档支持 pdf、txt、md、csv、json、xlsx、docx、pptx，图片支持 png、jpeg、webp，文档最大 50MB（xlsx/docx/pptx 20MB），图片最大 30MB'
 
 /** 按 chatAI 的 model type 组织的上传规则表 */
 export const MODEL_UPLOAD_CONFIG: Record<string, UploadConfig> = {
@@ -88,22 +124,29 @@ export const MODEL_UPLOAD_CONFIG: Record<string, UploadConfig> = {
     maxCount: 3,
     maxImgCompressLimit: 7,
     targetCompressMB: 3,
-    fileType: `image/png,image/jpeg,image/webp,application/pdf,text/plain,text/csv,${XLSX_MIME}`,
-    hitWord:
-      '上传附件，最多3个，文档支持 pdf、txt、csv、xlsx，图片支持 png、jpeg、webp，文档最大 50MB（xlsx 20MB），图片最大 30MB',
+    fileType: ATTACHMENT_MIMES,
+    hitWord: ATTACHMENT_HINT,
   },
   'openapi': {
     maxCount: 3,
     maxImgCompressLimit: 7,
     targetCompressMB: 3,
-    fileType: `image/png,image/jpeg,image/webp,application/pdf,text/plain,text/csv,${XLSX_MIME}`,
-    hitWord:
-      '上传附件，最多3个，文档支持 pdf、txt、csv、xlsx，图片支持 png、jpeg、webp，文档最大 50MB（xlsx 20MB），图片最大 30MB',
+    fileType: ATTACHMENT_MIMES,
+    hitWord: ATTACHMENT_HINT,
   },
 }
 
 export function getUploadConfig(modelType: string): UploadConfig | null {
   return MODEL_UPLOAD_CONFIG[modelType] ?? null
+}
+
+/** 把 accept 用的 MIME 列表摊平成扩展名列表，供 @ 面板向后端下发筛选条件 */
+export function extensionsOfFileType(fileType: string): string[] {
+  const exts = new Set<string>()
+  for (const mime of fileType.split(',').map((t) => t.trim())) {
+    for (const ext of MIME_TO_EXTENSIONS[mime] ?? []) exts.add(ext)
+  }
+  return [...exts]
 }
 
 function getFileExtension(name: string): string {
