@@ -1,5 +1,5 @@
 <script lang="ts">
-export type ChartAction = 'zoom' | 'download' | 'close'
+export type ChartAction = 'zoom' | 'zoomIn' | 'zoomOut' | 'fit' | 'download' | 'close'
 </script>
 
 <script setup lang="ts">
@@ -20,6 +20,9 @@ const emit = defineEmits<{ (e: 'action', action: ChartAction): void }>()
 
 const TIPS: Record<ChartAction, string> = {
   zoom: '放大预览',
+  zoomIn: '放大',
+  zoomOut: '缩小',
+  fit: '适应画布',
   download: '下载为图片',
   close: '关闭',
 }
@@ -40,6 +43,36 @@ const TIPS: Record<ChartAction, string> = {
       <svg v-if="action === 'zoom'" width="16" height="16" viewBox="0 0 16 16" fill="none">
         <path
           d="M9.4 2.6h4v4M6.6 13.4h-4v-4M13.4 2.6l-4.6 4.6M2.6 13.4l4.6-4.6"
+          stroke="currentColor"
+          stroke-width="1.3"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </svg>
+      <!-- 按步长放大：放大镜 + 加号 -->
+      <svg v-else-if="action === 'zoomIn'" width="16" height="16" viewBox="0 0 16 16" fill="none">
+        <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.3" />
+        <path
+          d="M10.4 10.4L14 14M7 5.2v3.6M5.2 7h3.6"
+          stroke="currentColor"
+          stroke-width="1.3"
+          stroke-linecap="round"
+        />
+      </svg>
+      <!-- 按步长缩小：放大镜 + 减号 -->
+      <svg v-else-if="action === 'zoomOut'" width="16" height="16" viewBox="0 0 16 16" fill="none">
+        <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.3" />
+        <path
+          d="M10.4 10.4L14 14M5.2 7h3.6"
+          stroke="currentColor"
+          stroke-width="1.3"
+          stroke-linecap="round"
+        />
+      </svg>
+      <!-- 适应画布：四角向内收 -->
+      <svg v-else-if="action === 'fit'" width="16" height="16" viewBox="0 0 16 16" fill="none">
+        <path
+          d="M2.6 6.2v-3.6h3.6M13.4 6.2v-3.6h-3.6M2.6 9.8v3.6h3.6M13.4 9.8v3.6h-3.6"
           stroke="currentColor"
           stroke-width="1.3"
           stroke-linecap="round"
