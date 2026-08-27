@@ -66,6 +66,17 @@ const groupedConversations = computed(() => {
 const showLogoutDialog = ref(false)
 const logoutLoading = ref(false)
 
+/**
+ * 侧边栏三块入口（新建对话 / 文件管理 / 会话列表）的选中态互斥，任一时刻只有一个高亮：
+ * - 'files'：当前在文件管理页
+ * - 'new'：不在文件管理页且没有选中任何会话（空白新对话）
+ * - 'chat'：选中了某个会话，此时上面两个入口都是默认态
+ */
+const activeSection = computed<'new' | 'files' | 'chat'>(() => {
+  if (props.activeView === 'files') return 'files'
+  return props.activeId ? 'chat' : 'new'
+})
+
 // 删除会话确认弹窗
 const showDeleteDialog = ref(false)
 const pendingDeleteItem = ref<ChatItem | null>(null)
@@ -201,7 +212,11 @@ function handleSettings() {
         </button>
       </div>
 
-      <div class="new-chat-btn" @click="handleNewChat">
+      <div
+        class="new-chat-btn"
+        :class="{ active: activeSection === 'new' }"
+        @click="handleNewChat"
+      >
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
           <path d="M8 3V13M3 8H13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
         </svg>
@@ -210,7 +225,7 @@ function handleSettings() {
 
       <div
         class="nav-entry"
-        :class="{ active: props.activeView === 'files' }"
+        :class="{ active: activeSection === 'files' }"
         @click="handleOpenFileManager"
       >
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
@@ -229,7 +244,10 @@ function handleSettings() {
             v-for="item in group.items"
             :key="item.id"
             class="history-item"
-            :class="{ active: props.activeId === item.id, 'menu-open': activeMenuId === item.id }"
+            :class="{
+              active: activeSection === 'chat' && props.activeId === item.id,
+              'menu-open': activeMenuId === item.id,
+            }"
             @click="handleSelect(item.id)"
           >
             <svg class="history-item-icon" width="15" height="15" viewBox="0 0 16 16" fill="none">
@@ -306,14 +324,19 @@ function handleSettings() {
           <path d="M6 4L10 8L6 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
       </button>
-      <button class="new-chat-icon" @click="handleNewChat" title="新建对话">
+      <button
+        class="new-chat-icon"
+        :class="{ active: activeSection === 'new' }"
+        @click="handleNewChat"
+        title="新建对话"
+      >
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
           <path d="M8 3V13M3 8H13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
         </svg>
       </button>
       <button
         class="new-chat-icon"
-        :class="{ active: props.activeView === 'files' }"
+        :class="{ active: activeSection === 'files' }"
         title="文件管理"
         @click="handleOpenFileManager"
       >
@@ -500,41 +523,58 @@ function handleSettings() {
 
 .fold-btn:hover,
 .unfold-btn:hover,
-.new-chat-icon:hover {
+.new-chat-icon:not(.active):hover {
   background: var(--gf-bg-elevated);
   color: var(--gf-text-primary);
 }
 
+/* 新建对话 / 文件管理 / 会话项共用一套三态：
+   默认（无背景）→ hover（--gf-bg-elevated）→ 选中（--gf-bg-elevated + 主色文字）。
+   hover 一律加 :not(.active)，保证「选中态」与「hover 态」互斥，
+   同一时刻侧边栏只有一个入口带背景色。 */
 .new-chat-btn {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* 与 .history-item 保持一致的 40px 高度：作为 flex 子项需禁止压缩，
+     否则会话列表过长时会被挤扁，hover/选中背景高度与会话项不一致 */
   height: 40px;
+  flex: 0 0 auto;
+  box-sizing: border-box;
   padding: 0 12px;
   border-radius: 8px;
-  background: var(--gf-bg-elevated);
+  background: transparent;
   cursor: pointer;
   font-size: 14px;
   color: var(--gf-text-regular);
   margin-bottom: 16px;
-  transition: background 0.15s;
+  transition: background 0.15s, color 0.15s;
 }
 
-.new-chat-btn:hover {
+.new-chat-btn:not(.active):hover {
+  background: var(--gf-bg-elevated);
+}
+
+.new-chat-btn:not(.active):active {
   background: var(--gf-bg-elevated-hover);
 }
 
-.new-chat-btn:active {
-  background: var(--gf-bg-elevated-hover);
+.new-chat-btn.active {
+  background: var(--gf-bg-elevated);
+  color: var(--gf-primary);
 }
 
 .nav-entry {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* 与 .history-item 对齐：固定 40px，不随剩余空间被压缩 */
   height: 40px;
+  flex: 0 0 auto;
+  box-sizing: border-box;
   padding: 0 12px;
   border-radius: 8px;
+  background: transparent;
   cursor: pointer;
   font-size: 14px;
   color: var(--gf-text-regular);
@@ -542,7 +582,7 @@ function handleSettings() {
   transition: background 0.15s, color 0.15s;
 }
 
-.nav-entry:hover {
+.nav-entry:not(.active):hover {
   background: var(--gf-bg-elevated);
 }
 
@@ -582,6 +622,8 @@ function handleSettings() {
   align-items: center;
   gap: 8px;
   height: 40px;
+  flex: 0 0 auto;
+  box-sizing: border-box;
   padding: 0 8px 0 12px;
   border-radius: 8px;
   cursor: pointer;
@@ -597,7 +639,7 @@ function handleSettings() {
   color: var(--gf-primary);
 }
 
-.history-item:hover {
+.history-item:not(.active):hover {
   background: var(--gf-bg-elevated);
 }
 
