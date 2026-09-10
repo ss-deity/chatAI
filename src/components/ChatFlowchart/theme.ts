@@ -28,6 +28,8 @@ interface FlowTokens {
   edgeLabelBg: string
   /** 导出 PNG 与画布底色（透明背景导出会变成黑块） */
   background: string
+  /** 搜索命中节点的描边色（暖色，避免和蓝/绿系节点描边混淆） */
+  highlight: string
 }
 
 const TOKENS: Record<FlowTheme, FlowTokens> = {
@@ -43,6 +45,7 @@ const TOKENS: Record<FlowTheme, FlowTokens> = {
     edgeLabel: '#606a78',
     edgeLabelBg: '#ffffff',
     background: '#ffffff',
+    highlight: '#fa8c16',
   },
   dark: {
     node: {
@@ -56,6 +59,7 @@ const TOKENS: Record<FlowTheme, FlowTokens> = {
     edgeLabel: '#94a3b8',
     edgeLabelBg: '#16213e',
     background: '#16213e',
+    highlight: '#ffa940',
   },
 }
 

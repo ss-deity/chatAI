@@ -142,6 +142,10 @@ function mount(el: HTMLDivElement, wheelZoom: boolean): Graph {
         fill: (d: any) => t.node[nodeType(d)].fill,
         stroke: (d: any) => t.node[nodeType(d)].stroke,
         lineWidth: 1,
+        // 搜索高亮用外发光实现，基础样式必须显式给出 0 值：
+        // G6 取消状态时只会回填基础样式里存在的属性，缺省的发光会残留在节点上
+        shadowColor: 'transparent',
+        shadowBlur: 0,
         labelText: (d: any) => nodeLabel(d),
         labelPlacement: 'center',
         labelFill: (d: any) => t.node[nodeType(d)].text,
@@ -152,6 +156,15 @@ function mount(el: HTMLDivElement, wheelZoom: boolean): Graph {
         labelMaxWidth: (d: any) => {
           const type = nodeType(d)
           return labelMaxWidth(sizeOf(nodeLabel(d), type)[0], type)
+        },
+      },
+      // 搜索命中态：加粗描边 + 外发光，节点填充保持原样以免看不清文字
+      state: {
+        highlight: {
+          stroke: t.highlight,
+          lineWidth: 3,
+          shadowColor: t.highlight,
+          shadowBlur: 12,
         },
       },
     },
@@ -291,6 +304,9 @@ onMounted(() => {
     if (zoomed.value && zoomBoxRef.value) {
       zoomGraph.value?.destroy()
       zoomGraph.value = mount(zoomBoxRef.value, true)
+      // 换肤是重建实例，搜索高亮状态要在新实例上重放一次
+      highlightedIds = []
+      void runSearch()
     }
   })
   themeObserver.observe(document.documentElement, {
@@ -335,7 +351,60 @@ function closeZoom() {
   zoomGraph.value?.destroy()
   zoomGraph.value = null
   zoomed.value = false
+  // 弹窗是独立实例，关闭即销毁，搜索态跟着清掉
+  keyword.value = ''
+  matchedIds.value = []
+  highlightedIds = []
   syncZoomLevel()
+}
+
+/* --------------------------- 弹窗内节点搜索 --------------------------- */
+
+/** 搜索关键字（实时生效，纯前端匹配，不回服务端） */
+const keyword = ref('')
+/** 当前命中的节点 id，按流程图里的原始顺序 */
+const matchedIds = ref<string[]>([])
+/** 上一次高亮的节点，换关键字时要先把它们的状态清掉 */
+let highlightedIds: string[] = []
+
+/**
+ * 模糊匹配：节点标签与说明都参与，忽略大小写与首尾空白，
+ * 命中规则是「包含关键字」，不做分词/拼音，保证结果可预期。
+ */
+function matchNodes(text: string): string[] {
+  const kw = text.trim().toLowerCase()
+  if (!kw) return []
+  return props.flowchart.nodes
+    .filter((n) => `${n.label} ${n.description ?? ''}`.toLowerCase().includes(kw))
+    .map((n) => n.id)
+}
+
+/** 命中节点描边高亮，并把第一个命中节点移到视口正中 */
+async function runSearch() {
+  const instance = zoomGraph.value
+  if (!instance || instance.destroyed) return
+  const ids = matchNodes(keyword.value)
+  matchedIds.value = ids
+  const states: Record<string, string[]> = {}
+  for (const id of highlightedIds) states[id] = []
+  for (const id of ids) states[id] = ['highlight']
+  highlightedIds = ids
+  try {
+    if (Object.keys(states).length) await instance.setElementState(states)
+    if (ids.length) {
+      await instance.focusElement(ids[0], { duration: 300, easing: 'ease-in-out' })
+      syncZoomLevel()
+    }
+  } catch (err) {
+    // 首帧渲染还没结束时状态设置会失败，下一次输入会重放，不用打扰用户
+    console.error('流程图搜索高亮失败', err)
+  }
+}
+
+watch(keyword, () => void runSearch())
+
+function clearSearch() {
+  keyword.value = ''
 }
 
 function handleAction(action: ChartAction) {
@@ -378,6 +447,33 @@ function handleAction(action: ChartAction) {
               @action="handleAction"
             />
           </div>
+        </div>
+        <!-- 节点搜索：输入即匹配，命中节点高亮并居中 -->
+        <div class="chat-flowchart__search">
+          <div class="chat-flowchart__search-box">
+            <svg class="chat-flowchart__search-icon" width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <circle cx="7" cy="7" r="4.6" stroke="currentColor" stroke-width="1.3"/>
+              <path d="M10.4 10.4L14 14" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+            </svg>
+            <input
+              v-model="keyword"
+              class="chat-flowchart__search-input"
+              placeholder="搜索节点名称或说明"
+            />
+            <button
+              v-if="keyword"
+              class="chat-flowchart__search-clear"
+              title="清空"
+              @click="clearSearch"
+            >
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+                <path d="M4 4L12 12M12 4L4 12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+              </svg>
+            </button>
+          </div>
+          <span v-if="keyword" class="chat-flowchart__search-count">
+            {{ matchedIds.length ? `命中 ${matchedIds.length} 个节点` : '无匹配节点' }}
+          </span>
         </div>
         <div ref="zoomBoxRef" class="chat-flowchart__canvas chat-flowchart__canvas--large"></div>
       </div>
@@ -438,7 +534,7 @@ function handleAction(action: ChartAction) {
 
 .chat-flowchart__canvas--large {
   height: min(72vh, 720px);
-  margin-top: 16px;
+  margin-top: 12px;
 }
 
 .chat-flowchart__mask {
@@ -472,6 +568,81 @@ function handleAction(action: ChartAction) {
   font-size: 14px;
   font-weight: 600;
   color: var(--gf-text-primary);
+}
+
+/* 节点搜索条：输入框样式对齐弹窗里的 gf-rename-input（高度收窄一档） */
+.chat-flowchart__search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 16px 0;
+}
+
+/* 只占弹窗宽度的约四分之一：搜索词都很短，铺满整行反而空 */
+.chat-flowchart__search-box {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 260px;
+  max-width: 100%;
+  padding: 0 10px;
+  height: 34px;
+  border: 1px solid var(--gf-border-strong);
+  border-radius: 10px;
+  background: var(--gf-bg-panel);
+  box-sizing: border-box;
+}
+
+.chat-flowchart__search-box:focus-within {
+  border-color: var(--gf-primary);
+}
+
+.chat-flowchart__search-icon {
+  flex-shrink: 0;
+  color: var(--gf-text-tertiary);
+}
+
+.chat-flowchart__search-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--gf-text-primary);
+}
+
+.chat-flowchart__search-input::placeholder {
+  color: var(--gf-text-disabled);
+}
+
+.chat-flowchart__search-clear {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--gf-text-tertiary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.chat-flowchart__search-clear:hover {
+  background: var(--gf-bg-elevated);
+  color: var(--gf-text-primary);
+}
+
+.chat-flowchart__search-count {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--gf-text-tertiary);
 }
 </style>
 
