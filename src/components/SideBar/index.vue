@@ -39,6 +39,9 @@ const emit = defineEmits<{
 const isFold = ref(false)
 const showUserMenu = ref(false)
 const activeMenuId = ref('')
+const menuUp = ref(false)
+// 菜单高度：4px padding * 2 + 2 项 * 34px + 1px 边框 * 2
+const ITEM_MENU_HEIGHT = 80
 
 /**
  * 按最近活跃时间把会话分组：今天 / 昨天 / 近7天 / 更早。
@@ -116,7 +119,20 @@ function toggleUserMenu() {
 
 function toggleItemMenu(id: string, e: MouseEvent) {
   e.stopPropagation()
-  activeMenuId.value = activeMenuId.value === id ? '' : id
+  if (activeMenuId.value === id) {
+    activeMenuId.value = ''
+    return
+  }
+  // 靠底部的会话项，菜单往下展开会被列表滚动区裁掉、并被 user-area 遮住，改为向上弹
+  const item = (e.currentTarget as HTMLElement).closest('.history-item') as HTMLElement | null
+  const list = item?.closest('.history-list') as HTMLElement | null
+  if (item && list) {
+    const spaceBelow = list.getBoundingClientRect().bottom - item.getBoundingClientRect().bottom
+    menuUp.value = spaceBelow < ITEM_MENU_HEIGHT
+  } else {
+    menuUp.value = false
+  }
+  activeMenuId.value = id
 }
 
 function handleDeleteChat(item: ChatItem, e: MouseEvent) {
@@ -286,7 +302,12 @@ function handleSettings() {
                 <circle cx="13" cy="8" r="1.3" fill="currentColor"/>
               </svg>
             </button>
-            <div v-if="activeMenuId === item.id" class="history-item-menu" @click.stop>
+            <div
+              v-if="activeMenuId === item.id"
+              class="history-item-menu"
+              :class="{ up: menuUp }"
+              @click.stop
+            >
               <div class="history-item-menu-btn" @click="(e) => handleRenameChat(item, e)">
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
                   <path d="M11.5 2.5l2 2L6 12l-2.5.5L4 10 11.5 2.5z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
@@ -746,6 +767,11 @@ function handleSettings() {
   box-shadow: var(--gf-shadow-menu);
   padding: 4px;
   z-index: 50;
+}
+
+.history-item-menu.up {
+  top: auto;
+  bottom: calc(100% - 4px);
 }
 
 .history-item-menu-btn {

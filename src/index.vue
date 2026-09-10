@@ -83,6 +83,12 @@ marked.setOptions({
 interface Message {
   role: 'user' | 'assistant'
   content: string
+  /** 数据库 id：落库后才有，点赞/点踩/删除都要靠它 */
+  id?: number
+  /** 消息生成时间（ISO 字符串），显示在回答下方 */
+  createdAt?: string
+  /** 用户对这条回复的评价：1 赞 / -1 踩 / 0 未评价 */
+  feedback?: number
   /** 生成的图片（如即梦图片生成），按图片组件渲染 */
   images?: string[]
   /** 用户消息附带的附件（图片/文档），发消息时随请求上传给后端 */
@@ -1148,6 +1154,36 @@ watch(activeChatId, () => {
   })
 })
 
+/** 代码块复制按钮的两种图标：默认「复制」与复制成功后的「对号」 */
+const CODE_COPY_ICON =
+  '<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><rect x="5.5" y="5.5" width="8" height="9" rx="1.6" stroke="currentColor" stroke-width="1.2"/><path d="M10.5 3.2A1.7 1.7 0 008.9 2H4.1A1.6 1.6 0 002.5 3.6v6.8a1.7 1.7 0 001.3 1.6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>'
+const CODE_COPIED_ICON =
+  '<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M3 8.6l3.2 3.2L13 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+
+/**
+ * 给渲染后的代码块（SQL 等）套一层容器并挂上复制按钮。
+ * 在 DOMPurify 之后用 DOM API 加，按钮内容是固定常量，不引入注入风险。
+ */
+function decorateCodeBlocks(html: string): string {
+  const holder = document.createElement('div')
+  holder.innerHTML = html
+  for (const pre of Array.from(holder.querySelectorAll('pre'))) {
+    const parent = pre.parentElement
+    if (!parent || parent.classList.contains('code-block')) continue
+    const wrap = document.createElement('div')
+    wrap.className = 'code-block'
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.className = 'code-copy-btn'
+    btn.title = '复制'
+    btn.innerHTML = CODE_COPY_ICON
+    parent.insertBefore(wrap, pre)
+    wrap.appendChild(pre)
+    wrap.appendChild(btn)
+  }
+  return holder.innerHTML
+}
+
 /**
  * 将 assistant 的 markdown 文本渲染为安全的 HTML。
  * 使用同步的 marked.parse + DOMPurify 净化，配合流式 token 追加即可实现打字机效果。
@@ -1156,13 +1192,37 @@ function renderMarkdown(content: string): string {
   if (!content) return ''
   try {
     const html = marked.parse(content) as string
-    return DOMPurify.sanitize(html, {
-      ADD_ATTR: ['target', 'rel'],
-    })
+    return decorateCodeBlocks(
+      DOMPurify.sanitize(html, {
+        ADD_ATTR: ['target', 'rel'],
+      }),
+    )
   } catch (err) {
     console.error('markdown 渲染失败', err)
     return DOMPurify.sanitize(content)
   }
+}
+
+/** 复制代码块内容：成功后图标临时变成对号 */
+async function handleCopyCodeBlock(btn: HTMLElement) {
+  const code = btn.parentElement?.querySelector('pre')?.textContent ?? ''
+  if (!code.trim()) return
+  const ok = await copyText(code.replace(/\n$/, ''))
+  if (!ok) {
+    ElMessage.error('复制失败，请手动选择文本复制')
+    return
+  }
+  ElMessage.success('已复制')
+  btn.classList.add('copied')
+  btn.title = '已复制'
+  btn.innerHTML = CODE_COPIED_ICON
+  window.setTimeout(() => {
+    // 流式重渲染可能已经把按钮换掉，节点不在文档里就不必还原
+    if (!btn.isConnected) return
+    btn.classList.remove('copied')
+    btn.title = '复制'
+    btn.innerHTML = CODE_COPY_ICON
+  }, 2000)
 }
 
 /* --------------------------- 文件弹窗预览 --------------------------- */
@@ -1180,12 +1240,18 @@ function openFilePreview(url: string, name?: string, type?: 'ppt' | 'excel' | 't
 }
 
 /**
- * 会话消息区的委托点击：当 assistant markdown 中出现 PPT / Excel 链接时，
- * 拦截默认跳转/下载行为，改为弹窗预览。
+ * 会话消息区的委托点击：代码块的复制按钮，以及 assistant markdown 中的
+ * PPT / Excel 链接（拦截默认跳转/下载行为，改为弹窗预览）。
  */
 function handleMessageListClick(e: MouseEvent) {
   const target = e.target as HTMLElement | null
   if (!target) return
+  const copyBtn = target.closest('.code-copy-btn') as HTMLElement | null
+  if (copyBtn) {
+    e.preventDefault()
+    void handleCopyCodeBlock(copyBtn)
+    return
+  }
   const anchor = target.closest('a') as HTMLAnchorElement | null
   if (!anchor) return
   // 只处理位于 assistant markdown-body 内的链接
@@ -1228,10 +1294,181 @@ function waitingLabel(msg: Message): string {
     : '正在思考'
 }
 
-function normalizeMessages(rawMessages: Array<{ role: string; content: string; images?: string[]; attachments?: RemoteAttachment[]; toolCalls?: ToolCall[]; charts?: ChartArtifact[]; flowcharts?: FlowchartArtifact[] }> | undefined): Message[] {
+/** 这条回答是否还在流式生成中：生成过程中不展示操作条 */
+function isStreamingMessage(idx: number): boolean {
+  return loading.value && idx === (activeSession.value?.assistantIndex ?? -1)
+}
+
+/** 操作条显示条件：assistant 消息、已生成完、且确实产出了内容 */
+function showMessageActions(msg: Message, idx: number): boolean {
+  if (msg.role !== 'assistant' || isStreamingMessage(idx)) return false
+  return !!(
+    msg.content ||
+    msg.images?.length ||
+    msg.charts?.length ||
+    msg.flowcharts?.length
+  )
+}
+
+const WEEKDAY_LABELS = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六']
+
+function pad2(n: number): string {
+  return n < 10 ? `0${n}` : String(n)
+}
+
+/**
+ * 回答时间展示：今天只给时分，本周加星期，更早给完整日期。
+ */
+function formatMessageTime(iso?: string): string {
+  if (!iso) return ''
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return ''
+  const now = new Date()
+  const hm = `${pad2(date.getHours())}:${pad2(date.getMinutes())}`
+  const sameDay =
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate()
+  if (sameDay) return hm
+  const diffDays = Math.floor((now.getTime() - date.getTime()) / 86400000)
+  if (diffDays < 7) return `${WEEKDAY_LABELS[date.getDay()]} ${hm}`
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${hm}`
+}
+
+/** 复制文本：优先 Clipboard API，非 https 环境退回 execCommand */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(ta)
+    return ok
+  }
+}
+
+/** 复制回答原文（Markdown 原样复制，粘到别处仍是结构化文本） */
+async function handleCopyMessage(msg: Message) {
+  if (!msg.content) {
+    ElMessage.warning('这条回答没有可复制的文本')
+    return
+  }
+  const ok = await copyText(msg.content)
+  if (ok) ElMessage.success('已复制回答')
+  else ElMessage.error('复制失败，请手动选择文本复制')
+}
+
+/**
+ * 分享：把「提问 + 回答 + 时间」整理成 Markdown 复制走，
+ * 不依赖服务端分享链接，粘到 IM / 文档里就是完整一轮对话。
+ */
+async function handleShareMessage(idx: number) {
+  const list = messages.value
+  const msg = list[idx]
+  if (!msg) return
+  const question = idx > 0 && list[idx - 1]?.role === 'user' ? list[idx - 1].content : ''
+  const time = formatMessageTime(msg.createdAt)
+  const lines: string[] = []
+  if (question) lines.push(`**提问**：${question}`, '')
+  lines.push('**回答**：', msg.content || '（无文本内容）')
+  if (time) lines.push('', `— ChatAI ${time}`)
+  const ok = await copyText(lines.join('\n'))
+  if (ok) ElMessage.success('分享内容已复制，可直接粘贴发送')
+  else ElMessage.error('复制失败，请手动选择文本复制')
+}
+
+/** 点赞 / 点踩：再点一次同一个按钮即取消，结果落库到 messages.feedback */
+async function handleFeedback(idx: number, value: 1 | -1) {
+  const state = activeSession.value
+  const msg = state?.messages[idx]
+  if (!state || !msg) return
+  if (!msg.id) {
+    ElMessage.warning('这条回答还未保存完成，请稍后再试')
+    return
+  }
+  const prev = msg.feedback ?? 0
+  const next = prev === value ? 0 : value
+  state.messages[idx] = { ...msg, feedback: next }
+  try {
+    const response = await fetch(`/api/messages/${msg.id}/feedback`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ feedback: next }),
+    })
+    const data = await response.json()
+    if (!response.ok || data.code !== 0) {
+      throw new Error(data.message || `HTTP ${response.status}`)
+    }
+  } catch (error) {
+    // 失败回滚，避免界面显示成功但服务端没记上
+    state.messages[idx] = { ...state.messages[idx], feedback: prev }
+    ElMessage.error('操作失败: ' + (error as Error).message)
+  }
+}
+
+/** 删除回答确认弹窗（沿用 SideBar 的 gf-dialog 风格） */
+const showMessageDeleteDialog = ref(false)
+const pendingDeleteMessageIdx = ref(-1)
+
+/** 删除单条回答：仅删这条 assistant 消息，用户提问保留 */
+function handleDeleteMessage(idx: number) {
+  pendingDeleteMessageIdx.value = idx
+  showMessageDeleteDialog.value = true
+}
+
+function cancelDeleteMessage() {
+  showMessageDeleteDialog.value = false
+  pendingDeleteMessageIdx.value = -1
+}
+
+/** 待删除回答的摘要文案，弹窗里高亮显示，便于确认删的是哪条 */
+const pendingDeleteMessageBrief = computed<string>(() => {
+  const msg = messages.value[pendingDeleteMessageIdx.value]
+  if (!msg) return ''
+  const text = msg.content.replace(/\s+/g, ' ').trim()
+  if (!text) return '（无文本内容）'
+  return text.length > 30 ? `${text.slice(0, 30)}…` : text
+})
+
+async function confirmDeleteMessage() {
+  const idx = pendingDeleteMessageIdx.value
+  const state = activeSession.value
+  const msg = state?.messages[idx]
+  if (!state || !msg) {
+    cancelDeleteMessage()
+    return
+  }
+  // 没有 id 说明还没落库（如失败中断的回复），只需从界面移除
+  if (msg.id) {
+    try {
+      const response = await fetch(`/api/messages/${msg.id}`, { method: 'DELETE' })
+      const data = await response.json()
+      if (!response.ok || data.code !== 0) {
+        throw new Error(data.message || `HTTP ${response.status}`)
+      }
+    } catch (error) {
+      ElMessage.error('删除失败: ' + (error as Error).message)
+      return
+    }
+  }
+  state.messages.splice(idx, 1)
+  cancelDeleteMessage()
+  ElMessage.success('已删除')
+}
+
+function normalizeMessages(rawMessages: Array<{ id?: number; role: string; content: string; createdAt?: string; feedback?: number; images?: string[]; attachments?: RemoteAttachment[]; toolCalls?: ToolCall[]; charts?: ChartArtifact[]; flowcharts?: FlowchartArtifact[] }> | undefined): Message[] {
   return (rawMessages ?? []).map((item) => ({
     role: item.role === 'assistant' ? 'assistant' : 'user',
     content: item.content ?? '',
+    id: item.id,
+    createdAt: item.createdAt,
+    feedback: item.feedback ?? 0,
     images: item.images && item.images.length ? item.images : undefined,
     attachments: item.attachments && item.attachments.length ? item.attachments : undefined,
     toolCalls: item.toolCalls && item.toolCalls.length ? item.toolCalls : undefined,
@@ -1399,7 +1636,13 @@ function handleSubmit() {
   }
   pendingAttachments.value = []
   mentionTokens.clear()
-  state.messages.push({ role: 'assistant', content: '' })
+  // createdAt 先用本地时间占位，落库回执到达后会替换成服务端时间
+  state.messages.push({
+    role: 'assistant',
+    content: '',
+    createdAt: new Date().toISOString(),
+    feedback: 0,
+  })
   state.assistantIndex = state.messages.length - 1
   state.loading = true
   state.paused = false
@@ -1539,6 +1782,19 @@ function startChatStream(
           if (activeChatId.value === currentKey) scrollToBottom()
         }
       }
+      // 落库回执：拿到这条回答的数据库 id 与生成时间，操作条据此可用
+      const saved = (payload.choices as Array<{ delta?: { saved?: { messageId?: number; createdAt?: string } } }> | undefined)?.[0]?.delta?.saved
+      if (saved?.messageId) {
+        const s = sessionStates[currentKey]
+        const idx = s?.assistantIndex ?? -1
+        if (s && idx >= 0 && idx < s.messages.length) {
+          s.messages[idx] = {
+            ...s.messages[idx],
+            id: saved.messageId,
+            createdAt: saved.createdAt ?? s.messages[idx].createdAt,
+          }
+        }
+      }
     },
     onMessage(content) {
       const s = sessionStates[currentKey]
@@ -1629,7 +1885,12 @@ function handleRetry(idx: number) {
   const attachments = userMsg.attachments ?? []
 
   // 清空失败回复的内容，复用同一条气泡承载新的生成结果
-  state.messages[idx] = { role: 'assistant', content: '' }
+  state.messages[idx] = {
+    role: 'assistant',
+    content: '',
+    createdAt: new Date().toISOString(),
+    feedback: 0,
+  }
   state.assistantIndex = idx
   state.loading = true
   state.paused = false
@@ -1825,8 +2086,8 @@ watch(
               class="message-item"
               :class="msg.role"
             >
+              <template v-if="msg.role === 'assistant'">
               <div
-                v-if="msg.role === 'assistant'"
                 class="message-bubble markdown-body"
                 :class="{
                   'has-charts':
@@ -1872,6 +2133,61 @@ watch(
                   >重试</button>
                 </div>
               </div>
+              <!-- 回答操作条：生成结束后出现，含时间与点赞/点踩/复制/分享/删除 -->
+              <div
+                v-if="showMessageActions(msg, idx)"
+                class="message-actions"
+              >
+                <button
+                  class="message-action"
+                  :class="{ active: msg.feedback === 1 }"
+                  title="点赞"
+                  @click="handleFeedback(idx, 1)"
+                >
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                    <path d="M5.5 14V6.6l2.6-4.1a1 1 0 011.8.6v3h2.7a1.2 1.2 0 011.2 1.4l-.8 5A1.5 1.5 0 0111.5 14h-6z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                    <path d="M5.5 6.8H3.2a.7.7 0 00-.7.7v5.8a.7.7 0 00.7.7h2.3" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                  </svg>
+                </button>
+                <button
+                  class="message-action"
+                  :class="{ active: msg.feedback === -1 }"
+                  title="点踩"
+                  @click="handleFeedback(idx, -1)"
+                >
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                    <path d="M5.5 2v7.4l2.6 4.1a1 1 0 001.8-.6v-3h2.7a1.2 1.2 0 001.2-1.4l-.8-5A1.5 1.5 0 0011.5 2h-6z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                    <path d="M5.5 9.2H3.2a.7.7 0 01-.7-.7V2.7a.7.7 0 01.7-.7h2.3" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                  </svg>
+                </button>
+                <button class="message-action" title="复制" @click="handleCopyMessage(msg)">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                    <rect x="5.5" y="5.5" width="8" height="9" rx="1.6" stroke="currentColor" stroke-width="1.2"/>
+                    <path d="M10.5 3.2A1.7 1.7 0 008.9 2H4.1A1.6 1.6 0 002.5 3.6v6.8a1.7 1.7 0 001.3 1.6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+                  </svg>
+                </button>
+                <button class="message-action" title="分享" @click="handleShareMessage(idx)">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                    <circle cx="12" cy="3.6" r="1.9" stroke="currentColor" stroke-width="1.2"/>
+                    <circle cx="4" cy="8" r="1.9" stroke="currentColor" stroke-width="1.2"/>
+                    <circle cx="12" cy="12.4" r="1.9" stroke="currentColor" stroke-width="1.2"/>
+                    <path d="M10.3 4.5L5.7 6.9M5.7 9.1l4.6 2.4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+                  </svg>
+                </button>
+                <button
+                  class="message-action danger"
+                  title="删除"
+                  @click="handleDeleteMessage(idx)"
+                >
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                    <path d="M2.5 4h11M6 4V2.5a1 1 0 011-1h2a1 1 0 011 1V4M12.5 4l-.6 8.6a1.5 1.5 0 01-1.5 1.4H5.6a1.5 1.5 0 01-1.5-1.4L3.5 4M6.5 7v4M9.5 7v4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                </button>
+                <span v-if="formatMessageTime(msg.createdAt)" class="message-time">
+                  {{ formatMessageTime(msg.createdAt) }}
+                </span>
+              </div>
+              </template>
               <template v-else>
                 <div class="user-content-col">
                   <FileGrid
@@ -2064,6 +2380,37 @@ watch(
       v-model:visible="filePreview.visible"
       :file="filePreview.file"
     />
+
+    <!-- 删除回答确认弹窗（与侧边栏删除会话弹窗同风格） -->
+    <Teleport to="body">
+      <transition name="gf-dialog">
+        <div
+          v-if="showMessageDeleteDialog"
+          class="gf-dialog-mask"
+          @click.self="cancelDeleteMessage"
+        >
+          <div class="gf-dialog">
+            <div class="gf-dialog-header">
+              <h3 class="gf-dialog-title">删除回答</h3>
+              <button class="gf-dialog-close" @click="cancelDeleteMessage">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path d="M4 4L12 12M12 4L4 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+              </button>
+            </div>
+            <div class="gf-dialog-body">
+              确定要删除这条回答
+              <span class="gf-dialog-highlight">「{{ pendingDeleteMessageBrief }}」</span>
+              吗？该操作无法撤销。
+            </div>
+            <div class="gf-dialog-footer">
+              <button class="gf-btn gf-btn-plain" @click="cancelDeleteMessage">取消</button>
+              <button class="gf-btn gf-btn-danger" @click="confirmDeleteMessage">删除</button>
+            </div>
+          </div>
+        </div>
+      </transition>
+    </Teleport>
   </div>
 </template>
 
@@ -2394,6 +2741,55 @@ html, body, #app {
 
 .message-item.assistant {
   justify-content: flex-start;
+  /* 回答下方要挂一条操作栏，改成纵向排布 */
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+/* 回答操作栏：与时间一同常显 */
+.message-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 4px;
+  padding-left: 4px;
+}
+
+.message-action {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--gf-text-tertiary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.message-action:hover {
+  background: var(--gf-bg-elevated);
+  color: var(--gf-text-primary);
+}
+
+/* 已点赞/已点踩：用主色标出当前评价状态 */
+.message-action.active {
+  color: var(--gf-primary);
+}
+
+.message-action.danger:hover {
+  background: var(--gf-danger-bg);
+  color: var(--gf-danger);
+}
+
+.message-time {
+  margin-left: 6px;
+  font-size: 12px;
+  color: var(--gf-text-tertiary);
+  user-select: none;
 }
 
 .message-bubble {
@@ -2584,6 +2980,49 @@ html, body, #app {
   background: transparent;
   color: inherit;
   font-size: inherit;
+}
+
+/* 代码块（SQL 等）容器：右上角挂复制按钮，hover 到这段代码时才出现 */
+.markdown-body :deep(.code-block) {
+  position: relative;
+}
+
+.markdown-body :deep(.code-block pre) {
+  /* 给右上角按钮留位，避免长行代码钻到按钮底下 */
+  padding-right: 44px;
+}
+
+.markdown-body :deep(.code-copy-btn) {
+  position: absolute;
+  top: 16px;
+  right: 10px;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--gf-code-text, #e2e8f0);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
+}
+
+.markdown-body :deep(.code-block:hover .code-copy-btn) {
+  opacity: 1;
+}
+
+.markdown-body :deep(.code-copy-btn:hover) {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.markdown-body :deep(.code-copy-btn.copied) {
+  opacity: 1;
+  color: #67c23a;
+  border-color: rgba(103, 194, 58, 0.5);
 }
 
 .markdown-body :deep(table) {
